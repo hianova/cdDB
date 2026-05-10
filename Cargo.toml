@@ -1,0 +1,15 @@
+[package]
+name = "cdDB"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ahash = "0.8"
+crossbeam = "0.8"
+parking_lot = "0.12"
+
+[workspace]
+members = [
+    ".",
+    "tests/cdDB-test",
+]
