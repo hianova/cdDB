@@ -1,5 +1,4 @@
-use cdDB::{CdDBDispatcher, WriteCommand};
-use ahash::AHashMap;
+use cdDB::{CdDBDispatcher, WriteCommand, Attributes};
 use std::time::{Instant, Duration};
 use tokio::task;
 
@@ -15,18 +14,18 @@ async fn main() {
 /// Anti-pattern 4: Serial single operations (no pipelining)
 async fn test_pipelining_impact() {
     println!("\n[Test 1] Pipelining / Batching Impact");
-    let mut db = CdDBDispatcher::new();
+    let mut db = CdDBDispatcher::new(Some("data/serial".into()));
     
     // Serial Test
     let writer_tx_serial = db.register_partition("benchmark.serial".to_string());
     let count = 5000;
     let start_serial = Instant::now();
     for i in 0..count {
-        let mut attrs_int = AHashMap::new();
+        let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), i as u32);
         writer_tx_serial.send(WriteCommand::Insert {
             entity_id: i,
-            attributes: AHashMap::new(),
+            attributes: Attributes::new(),
             attributes_int: attrs_int,
         }).unwrap();
     }
@@ -41,9 +40,9 @@ async fn test_pipelining_impact() {
     let start_batch = Instant::now();
     let mut batch = Vec::new();
     for i in 0..count {
-        let mut attrs_int = AHashMap::new();
+        let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), i as u32);
-        batch.push((i, AHashMap::new(), attrs_int));
+        batch.push((i, Attributes::new(), attrs_int));
     }
     writer_tx_batch.send(WriteCommand::BatchInsert(batch)).unwrap();
     
@@ -57,17 +56,17 @@ async fn test_pipelining_impact() {
 /// Anti-pattern 10: Storing JSON blobs in strings
 async fn test_columnar_efficiency() {
     println!("\n[Test 2] Columnar Efficiency (Anti-pattern 10)");
-    let mut db = CdDBDispatcher::new();
+    let mut db = CdDBDispatcher::new(Some("data/columnar".into()));
     let writer_tx = db.register_partition("benchmark.columnar".to_string());
     
     let count = 50000;
     let mut batch = Vec::new();
     for i in 0..count {
-        let mut attrs_int = AHashMap::new();
+        let mut attrs_int = Attributes::new();
         attrs_int.insert("target".to_string(), i as u32);
         attrs_int.insert("noise1".to_string(), i as u32);
         attrs_int.insert("noise2".to_string(), i as u32);
-        batch.push((i, AHashMap::new(), attrs_int));
+        batch.push((i, Attributes::new(), attrs_int));
     }
     writer_tx.send(WriteCommand::BatchInsert(batch)).unwrap();
 
@@ -79,12 +78,11 @@ async fn test_columnar_efficiency() {
     let start = Instant::now();
     let snapshot = route.get_snapshot();
     let col = route.get_column_int("target").unwrap();
-    let data = col.data.read();
     
     let mut sum = 0u64;
     for ptr in snapshot.values() {
         if let Some(idx) = ptr.attribute_indices.get("target") {
-            if let Some(val) = data[*idx] {
+            if let Some(val) = col.get_element(*idx) {
                 sum += val as u64;
             }
         }
@@ -97,14 +95,14 @@ async fn test_columnar_efficiency() {
 /// Anti-pattern 7: Hot keys
 async fn test_hot_key_pressure() {
     println!("\n[Test 3] Hot Partition Reader Pressure (Anti-pattern 7)");
-    let mut db = CdDBDispatcher::new();
+    let mut db = CdDBDispatcher::new(Some("data/hot".into()));
     let writer_tx = db.register_partition("hot.partition".to_string());
     
-    let mut attrs_int = AHashMap::new();
+    let mut attrs_int = Attributes::new();
     attrs_int.insert("val".to_string(), 42);
     writer_tx.send(WriteCommand::Insert {
         entity_id: 999,
-        attributes: AHashMap::new(),
+        attributes: Attributes::new(),
         attributes_int: attrs_int,
     }).unwrap();
 

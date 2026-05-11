@@ -1,10 +1,10 @@
-use cdDB::{CdDBDispatcher, WriteCommand};
+use cdDB::{CdDBDispatcher, WriteCommand, Query};
 use ahash::AHashMap;
 use std::thread;
 use std::time::Duration;
 
 fn main() {
-    let mut db = CdDBDispatcher::new();
+    let mut db = CdDBDispatcher::new(Some("data".into()));
 
     // 1. Create a partition for "Food.Apple"
     let writer_tx = db.register_partition("Food.Apple".to_string());
@@ -19,38 +19,24 @@ fn main() {
     println!("--- Step 1: Inserting Entity 1 ---");
     writer_tx.send(WriteCommand::Insert {
         entity_id: 1,
-        attributes: attrs,
-        attributes_int: attrs_int,
+        attributes: attrs.into(),
+        attributes_int: attrs_int.into(),
     }).unwrap();
 
     // Wait a bit for the background thread to process
     thread::sleep(Duration::from_millis(100));
 
-    // 3. Read data using snapshot and ColumnArray access
+    // 3. Read data using the new Query interface
     if let Some(route) = db.get_route("Food.Apple") {
-        let snapshot = route.get_snapshot();
-        if let Some(ptr) = snapshot.get(&1) {
-            println!("Entity 1 found in snapshot: {:?}", ptr);
-            
-            // Look up "Country"
-            if let Some(idx) = ptr.attribute_indices.get("Country") {
-                if let Some(col) = route.get_column_str("Country") {
-                    let data = col.data.read();
-                    if let Some(val) = &data[*idx] {
-                        println!("  - Country: {}", val);
-                    }
-                }
-            }
-
-            // Look up "Price"
-            if let Some(idx) = ptr.attribute_indices.get("Price") {
-                if let Some(col) = route.get_column_int("Price") {
-                    let data = col.data.read();
-                    if let Some(val) = &data[*idx] {
-                        println!("  - Price: {}", val);
-                    }
-                }
-            }
+        let query = Query::new(route);
+        println!("Entity 1 access via Query:");
+        
+        if let Some(country) = query.get_str(1, "Country") {
+            println!("  - Country: {}", country);
+        }
+        
+        if let Some(price) = query.get_int(1, "Price") {
+            println!("  - Price: {}", price);
         }
     }
 
@@ -61,18 +47,9 @@ fn main() {
     thread::sleep(Duration::from_millis(100));
 
     if let Some(route) = db.get_route("Food.Apple") {
-        let snapshot = route.get_snapshot();
-        if snapshot.get(&1).is_none() {
-            println!("Entity 1 successfully deleted from snapshot.");
-            
-            // Check if it's None in the ColumnArray too
-            if let Some(col) = route.get_column_str("Country") {
-                let _data = col.data.read();
-                // Since we don't know the index anymore (removed from snapshot), 
-                // we'd normally trust the snapshot. But for this demo, let's just 
-                // check if the waitlist was populated.
-                println!("  - Column waitlist size: {}", col.waitlist.read().len());
-            }
+        let query = Query::new(route);
+        if query.get_str(1, "Country").is_none() {
+            println!("Entity 1 successfully deleted (verified via Query).");
         }
     }
 
@@ -81,16 +58,22 @@ fn main() {
     attrs2.insert("Country".to_string(), "Taiwan".to_string());
     writer_tx.send(WriteCommand::Insert {
         entity_id: 2,
-        attributes: attrs2,
-        attributes_int: AHashMap::new(),
+        attributes: attrs2.into(),
+        attributes_int: AHashMap::new().into(),
     }).unwrap();
 
     thread::sleep(Duration::from_millis(100));
     
     if let Some(route) = db.get_route("Food.Apple") {
+        let query = Query::new(route);
+        if let Some(country) = query.get_str(2, "Country") {
+            println!("Entity 2: Country = {}", country);
+        }
+        
+        // Check waitlist via internal access if needed (just for demo)
         if let Some(col) = route.get_column_str("Country") {
-            println!("  - Column waitlist size after re-insert: {}", col.waitlist.read().len());
-            println!("  - Column data size: {}", col.data.read().len());
+            println!("  - Column waitlist size: {}", col.get_waitlist_snapshot().len());
+            println!("  - Column data size: {}", col.data_len());
         }
     }
 }
