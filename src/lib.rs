@@ -58,6 +58,14 @@ impl<T> ColumnArray<T> {
         let data = unsafe { self.data.load(Ordering::Acquire, guard).as_ref().unwrap() };
         data.len()
     }
+
+    /// Optimized: Pin epoch once for multiple reads
+    pub fn with_data<F, R>(&self, f: F) -> R 
+    where F: FnOnce(&Vec<Option<T>>) -> R {
+        let guard = &epoch::pin();
+        let data = unsafe { self.data.load(Ordering::Acquire, guard).as_ref().unwrap() };
+        f(data)
+    }
 }
 
 /// 2. 多向量指針快照 (RCU Snapshot)
@@ -142,6 +150,17 @@ impl<'a> Query<'a> {
     pub fn entities(&self) -> Vec<usize> {
         self.snapshot.keys().cloned().collect()
     }
+
+    pub fn sum_int_range(&self, attr: &str, start_idx: usize, len: usize) -> Option<u64> {
+        self.route.get_column_int(attr).map(|col| {
+            col.with_data(|data| {
+                data.iter().skip(start_idx).take(len)
+                    .flatten()
+                    .map(|&v| v as u64)
+                    .sum()
+            })
+        })
+    }
 }
 
 /// 3. 分區/群組 (Partition / Group)
@@ -186,35 +205,45 @@ impl Partition {
     }
 
     pub fn run(mut self) {
-        while let Ok(cmd) = self.writer_rx.recv() {
-            // 1. Write to WAL
+        loop {
+            // 1. Wait for at least one command
+            let first_cmd = match self.writer_rx.recv() {
+                Ok(cmd) => cmd,
+                Err(_) => break, // Channel closed
+            };
+
+            // 2. Collect all currently available commands (Group Commit)
+            let mut commands = vec![first_cmd];
+            for cmd in self.writer_rx.try_iter() {
+                commands.push(cmd);
+            }
+
+            // 3. Batch write to WAL
             if let Some(ref mut file) = self.wal_file {
-                let bytes = bincode::serialize(&cmd).expect("Failed to serialize command");
-                let len = bytes.len() as u64;
-                file.write_all(&len.to_le_bytes()).expect("Failed to write len to WAL");
-                file.write_all(&bytes).expect("Failed to write cmd to WAL");
+                for cmd in &commands {
+                    let bytes = bincode::serialize(cmd).expect("Failed to serialize command");
+                    let len = bytes.len() as u64;
+                    file.write_all(&len.to_le_bytes()).expect("Failed to write len to WAL");
+                    file.write_all(&bytes).expect("Failed to write cmd to WAL");
+                }
                 file.flush().expect("Failed to flush WAL");
             }
 
-            // 2. Apply to memory
+            // 4. Batch apply to memory (Single RCU Swap)
             let guard = &epoch::pin();
-            self.apply_command(cmd, guard);
+            self.apply_batch_commands(commands, guard);
         }
     }
 
-    fn apply_command(&mut self, cmd: WriteCommand, guard: &epoch::Guard) {
-        match cmd {
-            WriteCommand::Insert { entity_id, attributes, attributes_int } => {
-                self.process_insert(entity_id, attributes, attributes_int, guard);
-            }
-            WriteCommand::BatchInsert(batch) => {
-                let mut next_pointers = unsafe {
-                    self.shared_pointers.load(Ordering::Acquire, guard).as_ref().unwrap().clone()
-                };
-                
-                for (entity_id, attributes, attributes_int) in batch {
-                    let mut new_indices = AHashMap::new();
+    fn apply_batch_commands(&mut self, commands: Vec<WriteCommand>, guard: &epoch::Guard) {
+        let mut next_pointers = unsafe {
+            self.shared_pointers.load(Ordering::Acquire, guard).as_ref().unwrap().clone()
+        };
 
+        for cmd in commands {
+            match cmd {
+                WriteCommand::Insert { entity_id, attributes, attributes_int } => {
+                    let mut new_indices = AHashMap::new();
                     for (name, val) in attributes {
                         let col = self.get_or_create_column_str(&name, guard);
                         col.acquire_lock();
@@ -222,7 +251,6 @@ impl Partition {
                         new_indices.insert(name, idx);
                         col.release_lock();
                     }
-
                     for (name, val) in attributes_int {
                         let col = self.get_or_create_column_int(&name, guard);
                         col.acquire_lock();
@@ -235,39 +263,56 @@ impl Partition {
                         attribute_indices: new_indices,
                     });
                 }
-                
-                let old = self.shared_pointers.swap(Owned::new(next_pointers), Ordering::AcqRel, guard);
-                unsafe { guard.defer_destroy(old); }
-            }
-            WriteCommand::Delete { entity_id } => {
-                let current = unsafe {
-                    self.shared_pointers.load(Ordering::Acquire, guard).as_ref().unwrap()
-                };
-                
-                if let Some(ptr) = current.get(&entity_id) {
-                    let mut next = current.clone();
-                    next.remove(&entity_id);
-                    
-                    for (name, &idx) in &ptr.attribute_indices {
-                        let cols_str = unsafe { self.columns_str.load(Ordering::Acquire, guard).as_ref().unwrap() };
-                        let cols_int = unsafe { self.columns_int.load(Ordering::Acquire, guard).as_ref().unwrap() };
-
-                        if let Some(col) = cols_str.get(name) {
+                WriteCommand::BatchInsert(batch) => {
+                    for (entity_id, attributes, attributes_int) in batch {
+                        let mut new_indices = AHashMap::new();
+                        for (name, val) in attributes {
+                            let col = self.get_or_create_column_str(&name, guard);
                             col.acquire_lock();
-                            self.update_column_element(col, idx, None, guard);
-                            col.release_lock();
-                        } else if let Some(col) = cols_int.get(name) {
-                            col.acquire_lock();
-                            self.update_column_element(col, idx, None, guard);
+                            let idx = self.insert_into_column(&col, val, guard);
+                            new_indices.insert(name, idx);
                             col.release_lock();
                         }
+                        for (name, val) in attributes_int {
+                            let col = self.get_or_create_column_int(&name, guard);
+                            col.acquire_lock();
+                            let idx = self.insert_into_column(&col, val, guard);
+                            new_indices.insert(name, idx);
+                            col.release_lock();
+                        }
+                        next_pointers.insert(entity_id, MultiVectorPointer {
+                            entity_id,
+                            attribute_indices: new_indices,
+                        });
                     }
-                    
-                    let old = self.shared_pointers.swap(Owned::new(next), Ordering::AcqRel, guard);
-                    unsafe { guard.defer_destroy(old); }
+                }
+                WriteCommand::Delete { entity_id } => {
+                    if let Some(ptr) = next_pointers.remove(&entity_id) {
+                        for (name, &idx) in &ptr.attribute_indices {
+                            let cols_str = unsafe { self.columns_str.load(Ordering::Acquire, guard).as_ref().unwrap() };
+                            let cols_int = unsafe { self.columns_int.load(Ordering::Acquire, guard).as_ref().unwrap() };
+
+                            if let Some(col) = cols_str.get(name) {
+                                col.acquire_lock();
+                                self.update_column_element(col, idx, None, guard);
+                                col.release_lock();
+                            } else if let Some(col) = cols_int.get(name) {
+                                col.acquire_lock();
+                                self.update_column_element(col, idx, None, guard);
+                                col.release_lock();
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        let old = self.shared_pointers.swap(Owned::new(next_pointers), Ordering::AcqRel, guard);
+        unsafe { guard.defer_destroy(old); }
+    }
+
+    fn apply_command(&mut self, cmd: WriteCommand, guard: &epoch::Guard) {
+        self.apply_batch_commands(vec![cmd], guard);
     }
 
     pub fn replay_wal(&mut self, path: &PathBuf) {
@@ -316,35 +361,6 @@ impl Partition {
         }
     }
 
-    fn process_insert(&mut self, entity_id: usize, attributes: Attributes<String>, attributes_int: Attributes<u32>, guard: &epoch::Guard) {
-        let mut new_indices = AHashMap::new();
-
-        for (name, val) in attributes {
-            let col = self.get_or_create_column_str(&name, guard);
-            col.acquire_lock();
-            let idx = self.insert_into_column(&col, val, guard);
-            new_indices.insert(name, idx);
-            col.release_lock();
-        }
-
-        for (name, val) in attributes_int {
-            let col = self.get_or_create_column_int(&name, guard);
-            col.acquire_lock();
-            let idx = self.insert_into_column(&col, val, guard);
-            new_indices.insert(name, idx);
-            col.release_lock();
-        }
-
-        let current = unsafe { self.shared_pointers.load(Ordering::Acquire, guard).as_ref().unwrap() };
-        let mut next = current.clone();
-        next.insert(entity_id, MultiVectorPointer {
-            entity_id,
-            attribute_indices: new_indices,
-        });
-        
-        let old = self.shared_pointers.swap(Owned::new(next), Ordering::AcqRel, guard);
-        unsafe { guard.defer_destroy(old); }
-    }
 
     fn insert_into_column<T: Clone>(&self, col: &ColumnArray<T>, val: T, guard: &epoch::Guard) -> usize {
         let mut wl = unsafe { col.waitlist.load(Ordering::Acquire, guard).as_ref().unwrap().clone() };
