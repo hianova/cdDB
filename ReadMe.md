@@ -97,4 +97,4 @@ RUSTFLAGS="-Z sanitizer=address" cargo test
 
 ## 📜 License
 
-This project is licensed under the MIT License.
+PolyForm Noncommercial License 1.0
