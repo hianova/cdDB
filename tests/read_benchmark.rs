@@ -1,6 +1,5 @@
-use cdDB::{CdDBDispatcher, WriteCommand, Attributes, Query};
+use cdDB::{CdDBDispatcher, WriteCommand, Query, Attributes};
 use std::time::{Instant, Duration};
-use std::collections::HashMap;
 use ahash::AHashMap;
 
 #[derive(Clone)]
@@ -11,82 +10,109 @@ struct TraditionalStruct {
 
 #[tokio::test]
 async fn test_read_performance_benchmark() {
-    println!("\n=== cdDB Read Performance Benchmark (100,000 Entities) ===");
+    println!("\n=== cdDB Fair Performance Audit (100,000 Entities) ===");
     
     let count = 100_000;
     let scan_size = 10_000;
     
-    // 1. Prepare Data in cdDB
+    // 1. Prepare Data
     let mut db = CdDBDispatcher::new(None);
     let tx = db.register_partition("bench.read".to_string());
     
     let mut batch = Vec::with_capacity(count);
+    let mut hash_map = AHashMap::with_capacity(count);
+    let mut vec_struct = Vec::with_capacity(count);
+
     for i in 0..count {
         let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), i as u32);
         batch.push((i, Attributes::new(), attrs_int));
-    }
-    
-    let start_insert = Instant::now();
-    tx.send(WriteCommand::BatchInsert(batch)).unwrap();
-    
-    let route = db.get_route("bench.read").unwrap();
-    while route.get_snapshot().len() < count {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    println!("  - cdDB Data Prep (Batch Insert): {:?}", start_insert.elapsed());
-    
-    // 2. Prepare Data in Traditional structures
-    let mut hash_map = AHashMap::with_capacity(count);
-    let mut vec_struct = Vec::with_capacity(count);
-    for i in 0..count {
+
         let s = TraditionalStruct { id: i, val: i as u32 };
         hash_map.insert(i, s.clone());
         vec_struct.push(s);
     }
-    println!("  - Traditional Data Prep: Done");
+    
+    tx.send(WriteCommand::BatchInsert(batch)).await.unwrap();
+    let route = db.get_route("bench.read").unwrap();
+    let worker = route.register_worker();
+    while route.len(&worker) < count {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    println!("  - Data Preparation Complete.");
 
-    // 3. Benchmarks
-    
-    // Test A: cdDB Columnar Scan (Continuous Memory)
-    // We get the column and iterate directly to simulate cache-friendly range scan
-    let col = route.get_column_int("val").unwrap();
+    // --- SECTION 1: SCAN PERFORMANCE (Contiguous Access) ---
+    println!("\n[Section 1] Scan Performance ({} items):", scan_size);
+    let start_idx = count / 2;
+
+    // Test A: cdDB Columnar Scan
+    let col = route.get_column_int("val", &worker).unwrap();
     let start_a = Instant::now();
-    // Simulate starting from a pointer jump, then scanning 10,000 items
-    let start_idx = count / 2; 
-    let sum_a: u64 = col.with_data(|data| {
-        data.iter().skip(start_idx).take(scan_size)
-            .flatten()
-            .map(|&v| v as u64)
-            .sum()
+    let sum_a: u64 = col.with_data(&worker, |data| {
+        data.iter().skip(start_idx).take(scan_size).flatten().map(|&v| v as u64).sum()
     });
-    let duration_a = start_a.elapsed();
-    println!("  - [Test A] cdDB Columnar Scan ({} items): {:?}", scan_size, duration_a);
-    
-    // Test B: HashMap Lookup (Random Memory Access)
+    let dur_a = start_a.elapsed();
+    println!("  - cdDB Columnar Scan:  {:?}", dur_a);
+
+    // Test B: Vec<Struct> Scan
     let start_b = Instant::now();
     let mut sum_b = 0u64;
     for i in 0..scan_size {
-        if let Some(s) = hash_map.get(&(start_idx + i)) {
-            sum_b += s.val as u64;
-        }
+        sum_b += vec_struct[start_idx + i].val as u64;
     }
-    let duration_b = start_b.elapsed();
-    println!("  - [Test B] HashMap Lookup ({} items): {:?}", scan_size, duration_b);
-    
-    // Test C: Vec<Struct> Scan (Continuous Memory, but Struct layout)
+    let dur_b = start_b.elapsed();
+    println!("  - Vec<Struct> Scan:    {:?}", dur_b);
+    assert_eq!(sum_a, sum_b);
+
+    // --- SECTION 2: RANDOM LOOKUP PERFORMANCE ---
+    println!("\n[Section 2] Random Lookup Performance ({} items):", scan_size);
+
+    // Test C: HashMap Lookup
     let start_c = Instant::now();
     let mut sum_c = 0u64;
     for i in 0..scan_size {
-        sum_c += vec_struct[start_idx + i].val as u64;
+        if let Some(s) = hash_map.get(&(start_idx + i)) {
+            sum_c += s.val as u64;
+        }
     }
-    let duration_c = start_c.elapsed();
-    println!("  - [Test C] Vec<Struct> Scan ({} items): {:?}", scan_size, duration_c);
-    
-    assert_eq!(sum_a, sum_b);
-    assert_eq!(sum_b, sum_c);
-    
-    println!("\nConclusion:");
-    println!("  cdDB is {:.2}x faster than HashMap", duration_b.as_secs_f64() / duration_a.as_secs_f64());
-    println!("  cdDB is {:.2}x faster/slower than Vec<Struct>", duration_c.as_secs_f64() / duration_a.as_secs_f64());
+    let dur_c = start_c.elapsed();
+    println!("  - HashMap Lookup:      {:?}", dur_c);
+
+    // Test D: cdDB Query API (Hot Path)
+    let query = Query::new(route);
+    let start_d = Instant::now();
+    let mut sum_d = 0u64;
+    for i in 0..scan_size {
+        if let Some(v) = query.get_int(start_idx + i, "val").await {
+            sum_d += v as u64;
+        }
+    }
+    let dur_d = start_d.elapsed();
+    println!("  - cdDB Query API:      {:?}", dur_d);
+    assert_eq!(sum_c, sum_d);
+
+    // --- SECTION 3: CACHE PENETRATION (Bloom Filter Impact) ---
+    println!("\n[Section 3] Cache Penetration ({} misses):", scan_size);
+    let non_existent_start = count + 1000;
+
+    // Test E: HashMap Missing Lookups
+    let start_e = Instant::now();
+    for i in 0..scan_size {
+        let _ = hash_map.get(&(non_existent_start + i));
+    }
+    let dur_e = start_e.elapsed();
+    println!("  - HashMap Misses:      {:?}", dur_e);
+
+    // Test F: cdDB Query API Misses (Bloom Filter)
+    let start_f = Instant::now();
+    for i in 0..scan_size {
+        let _ = query.get_int(non_existent_start + i, "val").await;
+    }
+    let dur_f = start_f.elapsed();
+    println!("  - cdDB Bloom Misses:   {:?}", dur_f);
+
+    println!("\n--- Audit Conclusion ---");
+    println!("1. Scan Efficiency: cdDB is {:.2}x faster than Vec<Struct> (DOD benefit)", dur_b.as_secs_f64() / dur_a.as_secs_f64());
+    println!("2. Lookup Overhead: cdDB Query API is {:.2}x slower than HashMap (Async/Security overhead)", dur_d.as_secs_f64() / dur_c.as_secs_f64());
+    println!("3. Bloom Impact:    cdDB Misses are {:.2}x slower/faster than HashMap Misses", dur_f.as_secs_f64() / dur_e.as_secs_f64());
 }

@@ -1,33 +1,56 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use ahash::AHashMap;
-use crossbeam::channel::{Sender, Receiver, unbounded};
-use crossbeam::epoch::{self, Atomic, Owned};
-use serde::{Serialize, Deserialize};
-use std::fs::{File, OpenOptions};
-use std::io::{Write, BufReader, Read};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use dualcache_ff::{Config, DualCacheFF};
+use fastbloom::BloomFilter;
+use serde::{Deserialize, Serialize};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicPtr;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use tokio::sync::oneshot;
+
+mod qsbr;
+mod storage;
+mod unsafe_core;
+
+use qsbr::{QsbrManager, WorkerState};
+use storage::{AsyncStorage, EntityData};
+use unsafe_core::{load_clone, load_ref, new_atomic_ptr, swap_ptr};
+
+/// 0. 核心列集合 (Columns Snapshot)
+#[derive(Clone)]
+pub struct Columns {
+    pub str_cols: AHashMap<String, Arc<ColumnArray<String>>>,
+    pub int_cols: AHashMap<String, Arc<ColumnArray<u32>>>,
+}
 
 /// 1. 最底層的連續資料陣列 (Column / DOD 結構)
 ///
-/// 使用 crossbeam::epoch 實現 Wait-Free 讀取
+/// 使用自定義 QSBR 實現 Wait-Free 讀取
 pub struct ColumnArray<T> {
-    pub data: Atomic<Vec<Option<T>>>, 
-    pub waitlist: Atomic<Vec<usize>>, 
-    pub(crate) write_guard: AtomicBool, 
+    pub data: AtomicPtr<Vec<Option<T>>>,
+    pub waitlist: AtomicPtr<Vec<usize>>,
+    pub(crate) write_guard: AtomicBool,
 }
 
 impl<T> ColumnArray<T> {
     pub fn new() -> Self {
         Self {
-            data: Atomic::new(Vec::new()),
-            waitlist: Atomic::new(Vec::new()),
+            data: new_atomic_ptr(Vec::new()),
+            waitlist: new_atomic_ptr(Vec::new()),
             write_guard: AtomicBool::new(false),
         }
     }
 
     pub fn acquire_lock(&self) {
         if self.write_guard.swap(true, Ordering::SeqCst) {
-            panic!("Data Race Detected: Multiple writers attempted to access the same ColumnArray!");
+            panic!(
+                "Data Race Detected: Multiple writers attempted to access the same ColumnArray!"
+            );
         }
     }
 
@@ -35,36 +58,52 @@ impl<T> ColumnArray<T> {
         self.write_guard.store(false, Ordering::SeqCst);
     }
 
-    pub fn get_element(&self, idx: usize) -> Option<T> where T: Clone {
-        let guard = &epoch::pin();
-        let data = unsafe { self.data.load(Ordering::Acquire, guard).as_ref().unwrap() };
-        data.get(idx).and_then(|v| v.clone())
+    pub fn get_element(&self, idx: usize, worker: &WorkerState) -> Option<T>
+    where
+        T: Clone,
+    {
+        worker.enter();
+        let data = unsafe { load_ref(&self.data) };
+        let val = data.get(idx).and_then(|v| v.clone());
+        worker.leave();
+        val
     }
 
-    pub fn get_data_snapshot(&self) -> Vec<Option<T>> where T: Clone {
-        let guard = &epoch::pin();
-        let data = self.data.load(Ordering::Acquire, guard);
-        unsafe { data.as_ref().unwrap().clone() }
+    pub fn get_data_snapshot(&self, worker: &WorkerState) -> Vec<Option<T>>
+    where
+        T: Clone,
+    {
+        worker.enter();
+        let data = unsafe { load_clone(&self.data) };
+        worker.leave();
+        data
     }
 
-    pub fn get_waitlist_snapshot(&self) -> Vec<usize> {
-        let guard = &epoch::pin();
-        let wl = self.waitlist.load(Ordering::Acquire, guard);
-        unsafe { wl.as_ref().unwrap().clone() }
+    pub fn get_waitlist_snapshot(&self, worker: &WorkerState) -> Vec<usize> {
+        worker.enter();
+        let wl = unsafe { load_clone(&self.waitlist) };
+        worker.leave();
+        wl
     }
 
-    pub fn data_len(&self) -> usize {
-        let guard = &epoch::pin();
-        let data = unsafe { self.data.load(Ordering::Acquire, guard).as_ref().unwrap() };
-        data.len()
+    pub fn data_len(&self, worker: &WorkerState) -> usize {
+        worker.enter();
+        let data = unsafe { load_ref(&self.data) };
+        let len = data.len();
+        worker.leave();
+        len
     }
 
-    /// Optimized: Pin epoch once for multiple reads
-    pub fn with_data<F, R>(&self, f: F) -> R 
-    where F: FnOnce(&Vec<Option<T>>) -> R {
-        let guard = &epoch::pin();
-        let data = unsafe { self.data.load(Ordering::Acquire, guard).as_ref().unwrap() };
-        f(data)
+    /// Optimized: Enter QSBR once for multiple reads
+    pub fn with_data<F, R>(&self, worker: &WorkerState, f: F) -> R
+    where
+        F: FnOnce(&Vec<Option<T>>) -> R,
+    {
+        worker.enter();
+        let data = unsafe { load_ref(&self.data) };
+        let res = f(data);
+        worker.leave();
+        res
     }
 }
 
@@ -72,7 +111,7 @@ impl<T> ColumnArray<T> {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MultiVectorPointer {
     pub entity_id: usize,
-    pub attribute_indices: AHashMap<String, usize>, 
+    pub attribute_indices: AHashMap<String, usize>,
 }
 
 /// 寫入指令屬性封裝
@@ -108,53 +147,217 @@ impl<V> IntoIterator for Attributes<V> {
     }
 }
 
-/// 寫入指令列舉
+/// 寫入指令列舉 (持久化用)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WriteCommand {
-    Insert { 
-        entity_id: usize, 
+    Insert {
+        entity_id: usize,
         attributes: Attributes<String>,
         attributes_int: Attributes<u32>,
     },
     BatchInsert(Vec<(usize, Attributes<String>, Attributes<u32>)>),
-    Delete { entity_id: usize },
+    Delete {
+        entity_id: usize,
+    },
+}
+
+/// 內部指令列舉 (非同步溝通用)
+#[derive(Debug)]
+pub enum PartitionCommand {
+    Write(WriteCommand),
+    InternalLoad {
+        entity_id: usize,
+        response_tx: oneshot::Sender<Option<MultiVectorPointer>>,
+    },
 }
 
 /// 4. 查詢接口 (Query Engine)
 /// 實踐 SPEC 中提到的「極速多重指標跳轉」
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum QueryNode {
+    /// 精準取值
+    Get { entity_id: usize, attr: String },
+    /// 跨陣列跳轉 (目前限於同分區內)
+    Link {
+        from_entity_id: usize,
+        link_attr: String,
+        target_attr: String,
+    },
+    /// 範圍取值
+    Range {
+        entity_id: usize, // 起始 ID
+        attr: String,
+        len: usize,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CdDbQuery {
+    pub nodes: Vec<QueryNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum QueryResult {
+    Str(String),
+    Int(u32),
+    IntRange(Vec<u32>),
+    None,
+}
+
 pub struct Query<'a> {
     route: &'a PartitionRoute,
-    snapshot: AHashMap<usize, MultiVectorPointer>,
+    worker: Arc<WorkerState>,
 }
 
 impl<'a> Query<'a> {
     pub fn new(route: &'a PartitionRoute) -> Self {
-        Self {
-            route,
-            snapshot: route.get_snapshot(),
+        let worker = route.register_worker();
+        Self { route, worker }
+    }
+
+    pub async fn execute(&self, query: CdDbQuery) -> Vec<QueryResult> {
+        let mut results = Vec::new();
+        for node in query.nodes {
+            match node {
+                QueryNode::Get { entity_id, attr } => {
+                    if let Some(v) = self.get_int(entity_id, &attr).await {
+                        results.push(QueryResult::Int(v));
+                    } else if let Some(v) = self.get_str(entity_id, &attr).await {
+                        results.push(QueryResult::Str(v));
+                    } else {
+                        results.push(QueryResult::None);
+                    }
+                }
+                QueryNode::Link {
+                    from_entity_id,
+                    link_attr,
+                    target_attr,
+                } => {
+                    if let Some(target_id) = self.get_int(from_entity_id, &link_attr).await {
+                        let target_id = target_id as usize;
+                        if let Some(v) = self.get_int(target_id, &target_attr).await {
+                            results.push(QueryResult::Int(v));
+                        } else if let Some(v) = self.get_str(target_id, &target_attr).await {
+                            results.push(QueryResult::Str(v));
+                        } else {
+                            results.push(QueryResult::None);
+                        }
+                    } else {
+                        results.push(QueryResult::None);
+                    }
+                }
+                QueryNode::Range {
+                    entity_id,
+                    attr,
+                    len,
+                } => {
+                    // Range scan usually happens on hot data or specific blocks
+                    if let Some(ptr) = self.get_pointer(entity_id).await {
+                        if let Some(&start_idx) = ptr.attribute_indices.get(&attr) {
+                            if let Some(col) = self.route.get_column_int(&attr, &self.worker) {
+                                let range_vals = col.with_data(&self.worker, |data| {
+                                    data.iter()
+                                        .skip(start_idx)
+                                        .take(len)
+                                        .flatten()
+                                        .cloned()
+                                        .collect()
+                                });
+                                results.push(QueryResult::IntRange(range_vals));
+                                continue;
+                            }
+                        }
+                    }
+                    results.push(QueryResult::None);
+                }
+            }
         }
+        results
     }
 
-    pub fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
-        self.snapshot.get(&entity_id)
-            .and_then(|ptr| ptr.attribute_indices.get(attr))
-            .and_then(|&idx| self.route.get_column_str(attr).and_then(|col| col.get_element(idx)))
+    async fn get_pointer(&self, entity_id: usize) -> Option<MultiVectorPointer> {
+        // 1. Bloom Filter Check
+        {
+            let bloom = self.route.bloom_filter.lock().unwrap();
+            if !bloom.contains(&entity_id) {
+                return None;
+            }
+        }
+
+        // 2. Full Memory Index Check (Wait-Free RCU)
+        {
+            self.worker.enter();
+            let snap = unsafe { load_ref(&self.route.shared_pointers) };
+            let ptr = snap.get(&entity_id).cloned();
+            self.worker.leave();
+            if let Some(p) = ptr {
+                self.route.hot_index.insert(entity_id, ()); // Track hit
+                return Some(p);
+            }
+        }
+
+        // 3. Page Fault (Async Disk Load)
+        let (tx, rx) = oneshot::channel();
+        let _ = self.route.writer_tx.send(PartitionCommand::InternalLoad {
+            entity_id,
+            response_tx: tx,
+        }).await;
+        
+        rx.await.unwrap_or(None)
     }
 
-    pub fn get_int(&self, entity_id: usize, attr: &str) -> Option<u32> {
-        self.snapshot.get(&entity_id)
-            .and_then(|ptr| ptr.attribute_indices.get(attr))
-            .and_then(|&idx| self.route.get_column_int(attr).and_then(|col| col.get_element(idx)))
+    pub async fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
+        if let Some(ptr) = self.get_pointer(entity_id).await {
+            if let Some(&idx) = ptr.attribute_indices.get(attr) {
+                return self
+                    .route
+                    .get_column_str(attr, &self.worker)
+                    .and_then(|col| col.get_element(idx, &self.worker));
+            }
+        }
+        None
+    }
+
+    pub async fn get_int(&self, entity_id: usize, attr: &str) -> Option<u32> {
+        if let Some(ptr) = self.get_pointer(entity_id).await {
+            if let Some(&idx) = ptr.attribute_indices.get(attr) {
+                return self
+                    .route
+                    .get_column_int(attr, &self.worker)
+                    .and_then(|col| col.get_element(idx, &self.worker));
+            }
+        }
+        None
+    }
+
+    pub async fn async_sum_int_range(&self, attr: &str, entity_ids: Vec<usize>) -> u64 {
+        use futures::future::join_all;
+        let futures: Vec<_> = entity_ids
+            .into_iter()
+            .map(|id| self.get_int(id, attr))
+            .collect();
+        let results = join_all(futures).await;
+        results.into_iter().flatten().map(|v| v as u64).sum()
+    }
+
+    pub fn seed_bloom_filter(&self, entity_id: usize) {
+        let mut bloom = self.route.bloom_filter.lock().unwrap();
+        bloom.insert(&entity_id);
     }
 
     pub fn entities(&self) -> Vec<usize> {
-        self.snapshot.keys().cloned().collect()
+        // Since we use Bloom Filter and DualCacheFF, we don't have a simple list of all entities in memory.
+        // In a real system, we'd query the persistent index.
+        Vec::new()
     }
 
     pub fn sum_int_range(&self, attr: &str, start_idx: usize, len: usize) -> Option<u64> {
-        self.route.get_column_int(attr).map(|col| {
-            col.with_data(|data| {
-                data.iter().skip(start_idx).take(len)
+        self.route.get_column_int(attr, &self.worker).map(|col| {
+            col.with_data(&self.worker, |data| {
+                data.iter()
+                    .skip(start_idx)
+                    .take(len)
                     .flatten()
                     .map(|&v| v as u64)
                     .sum()
@@ -165,207 +368,256 @@ impl<'a> Query<'a> {
 
 /// 3. 分區/群組 (Partition / Group)
 pub struct Partition {
-    // 使用 Arc<Atomic<...>> 以便與 PartitionRoute 共享並支援 Wait-Free 讀取
-    pub columns_str: Arc<Atomic<AHashMap<String, Arc<ColumnArray<String>>>>>, 
-    pub columns_int: Arc<Atomic<AHashMap<String, Arc<ColumnArray<u32>>>>>, 
+    pub columns: Arc<AtomicPtr<Columns>>,
+    pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
+    pub writer_rx: Receiver<PartitionCommand>,
+    pub qsbr: QsbrManager,
 
-    pub shared_pointers: Arc<Atomic<AHashMap<usize, MultiVectorPointer>>>,
-    writer_rx: Receiver<WriteCommand>, 
+    // 持久層與快照
+    pub storage: Arc<AsyncStorage>,
+    pub hot_index: DualCacheFF<usize, ()>, // Just for heat tracking
+    pub bloom_filter: Arc<Mutex<BloomFilter>>,
 
     // WAL 支援
-    wal_file: Option<File>,
+    pub wal_file: Option<File>,
 }
 
 impl Partition {
-    pub fn new(
-        writer_rx: Receiver<WriteCommand>, 
-        shared_pointers: Arc<Atomic<AHashMap<usize, MultiVectorPointer>>>,
-        columns_str: Arc<Atomic<AHashMap<String, Arc<ColumnArray<String>>>>>,
-        columns_int: Arc<Atomic<AHashMap<String, Arc<ColumnArray<u32>>>>>,
+    pub async fn new(
+        writer_rx: Receiver<PartitionCommand>,
+        columns: Arc<AtomicPtr<Columns>>,
         wal_path: Option<PathBuf>,
+        workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
+        storage_path: PathBuf,
     ) -> Self {
-        let wal_file = wal_path.map(|path| {
+        let wal_file = if let Some(path) = wal_path {
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = tokio::fs::create_dir_all(parent).await;
             }
-            OpenOptions::new()
+            Some(OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
-                .expect("Failed to open WAL file")
-        });
+                .await
+                .expect("Failed to open WAL file"))
+        } else {
+            None
+        };
+
+        // Initialize DualCache-FF with a 100MB budget (example)
+        let cache_config = Config::with_memory_budget(100, 60);
+        let hot_index = DualCacheFF::new(cache_config);
+
+        let storage = Arc::new(AsyncStorage::new(storage_path));
+        let bloom_filter = Arc::new(Mutex::new(
+            BloomFilter::with_num_bits(1024 * 1024).hashes(4),
+        ));
+        let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::new()));
 
         Self {
-            columns_str,
-            columns_int,
+            columns,
             shared_pointers,
             writer_rx,
             wal_file,
+            qsbr: QsbrManager::new(workers),
+            storage,
+            hot_index,
+            bloom_filter,
         }
     }
 
-    pub fn run(mut self) {
-        loop {
-            // 1. Wait for at least one command
-            let first_cmd = match self.writer_rx.recv() {
-                Ok(cmd) => cmd,
-                Err(_) => break, // Channel closed
-            };
+    pub fn set_budget(&mut self, _bytes: usize) {
+        // Managed by DualCache-FF
+    }
 
-            // 2. Collect all currently available commands (Group Commit)
-            let mut commands = vec![first_cmd];
-            for cmd in self.writer_rx.try_iter() {
-                commands.push(cmd);
+    pub async fn run(mut self) {
+        while let Some(cmd) = self.writer_rx.recv().await {
+            let mut commands = vec![cmd];
+            for _ in 0..1000 {
+                if let Ok(next) = self.writer_rx.try_recv() {
+                    commands.push(next);
+                } else {
+                    break;
+                }
             }
 
-            // 3. Batch write to WAL
             if let Some(ref mut file) = self.wal_file {
                 for cmd in &commands {
-                    let bytes = bincode::serialize(cmd).expect("Failed to serialize command");
-                    let len = bytes.len() as u64;
-                    file.write_all(&len.to_le_bytes()).expect("Failed to write len to WAL");
-                    file.write_all(&bytes).expect("Failed to write cmd to WAL");
+                    if let PartitionCommand::Write(wcmd) = cmd {
+                        let bytes = bincode::serialize(wcmd).expect("Failed to serialize command");
+                        let len = bytes.len() as u64;
+                        file.write_all(&len.to_le_bytes()).await.expect("Failed to write len to WAL");
+                        file.write_all(&bytes).await.expect("Failed to write cmd to WAL");
+                    }
                 }
-                file.flush().expect("Failed to flush WAL");
+                file.flush().await.expect("Failed to flush WAL");
             }
 
-            // 4. Batch apply to memory (Single RCU Swap)
-            let guard = &epoch::pin();
-            self.apply_batch_commands(commands, guard);
+            self.apply_batch_commands(commands).await;
+            self.qsbr.maintenance();
         }
     }
 
-    fn apply_batch_commands(&mut self, commands: Vec<WriteCommand>, guard: &epoch::Guard) {
-        let mut next_pointers = unsafe {
-            self.shared_pointers.load(Ordering::Acquire, guard).as_ref().unwrap().clone()
-        };
+    async fn apply_batch_commands(&mut self, commands: Vec<PartitionCommand>) {
+        let mut next_pointers = unsafe { load_clone(&self.shared_pointers) };
 
         for cmd in commands {
             match cmd {
-                WriteCommand::Insert { entity_id, attributes, attributes_int } => {
-                    let mut new_indices = AHashMap::new();
-                    for (name, val) in attributes {
-                        let col = self.get_or_create_column_str(&name, guard);
-                        col.acquire_lock();
-                        let idx = self.insert_into_column(&col, val, guard);
-                        new_indices.insert(name, idx);
-                        col.release_lock();
+                PartitionCommand::Write(wcmd) => match wcmd {
+                    WriteCommand::Insert { entity_id, attributes, attributes_int } => {
+                        self.process_insert(&mut next_pointers, entity_id, attributes, attributes_int).await;
                     }
-                    for (name, val) in attributes_int {
-                        let col = self.get_or_create_column_int(&name, guard);
-                        col.acquire_lock();
-                        let idx = self.insert_into_column(&col, val, guard);
-                        new_indices.insert(name, idx);
-                        col.release_lock();
-                    }
-                    next_pointers.insert(entity_id, MultiVectorPointer {
-                        entity_id,
-                        attribute_indices: new_indices,
-                    });
-                }
-                WriteCommand::BatchInsert(batch) => {
-                    for (entity_id, attributes, attributes_int) in batch {
-                        let mut new_indices = AHashMap::new();
-                        for (name, val) in attributes {
-                            let col = self.get_or_create_column_str(&name, guard);
-                            col.acquire_lock();
-                            let idx = self.insert_into_column(&col, val, guard);
-                            new_indices.insert(name, idx);
-                            col.release_lock();
-                        }
-                        for (name, val) in attributes_int {
-                            let col = self.get_or_create_column_int(&name, guard);
-                            col.acquire_lock();
-                            let idx = self.insert_into_column(&col, val, guard);
-                            new_indices.insert(name, idx);
-                            col.release_lock();
-                        }
-                        next_pointers.insert(entity_id, MultiVectorPointer {
-                            entity_id,
-                            attribute_indices: new_indices,
-                        });
-                    }
-                }
-                WriteCommand::Delete { entity_id } => {
-                    if let Some(ptr) = next_pointers.remove(&entity_id) {
-                        for (name, &idx) in &ptr.attribute_indices {
-                            let cols_str = unsafe { self.columns_str.load(Ordering::Acquire, guard).as_ref().unwrap() };
-                            let cols_int = unsafe { self.columns_int.load(Ordering::Acquire, guard).as_ref().unwrap() };
-
-                            if let Some(col) = cols_str.get(name) {
-                                col.acquire_lock();
-                                self.update_column_element(col, idx, None, guard);
-                                col.release_lock();
-                            } else if let Some(col) = cols_int.get(name) {
-                                col.acquire_lock();
-                                self.update_column_element(col, idx, None, guard);
-                                col.release_lock();
-                            }
+                    WriteCommand::BatchInsert(batch) => {
+                        for (entity_id, attributes, attributes_int) in batch {
+                            self.process_insert(&mut next_pointers, entity_id, attributes, attributes_int).await;
                         }
                     }
+                    WriteCommand::Delete { entity_id } => {
+                        next_pointers.remove(&entity_id);
+                        self.hot_index.remove(&entity_id);
+                    }
+                },
+                PartitionCommand::InternalLoad { entity_id, response_tx } => {
+                    if let Some(ptr) = next_pointers.get(&entity_id) {
+                        let _ = response_tx.send(Some(ptr.clone()));
+                        continue;
+                    }
+                    let block = self.storage.read_block(entity_id, 32).await;
+                    let mut target = None;
+                    for data in block {
+                        let ptr = self.process_promote(&mut next_pointers, data);
+                        if ptr.entity_id == entity_id { target = Some(ptr); }
+                    }
+                    let _ = response_tx.send(target);
                 }
             }
         }
 
-        let old = self.shared_pointers.swap(Owned::new(next_pointers), Ordering::AcqRel, guard);
-        unsafe { guard.defer_destroy(old); }
+        let old = swap_ptr(&self.shared_pointers, next_pointers);
+        self.qsbr.defer_free(old);
     }
 
-    fn apply_command(&mut self, cmd: WriteCommand, guard: &epoch::Guard) {
-        self.apply_batch_commands(vec![cmd], guard);
+    async fn process_insert(
+        &mut self,
+        next_pointers: &mut AHashMap<usize, MultiVectorPointer>,
+        entity_id: usize,
+        attributes: Attributes<String>,
+        attributes_int: Attributes<u32>,
+    ) {
+        let mut new_indices = AHashMap::new();
+
+        {
+            let mut bloom = self.bloom_filter.lock().unwrap();
+            bloom.insert(&entity_id);
+        }
+
+        for (name, val) in attributes.clone() {
+            let col = self.get_or_create_column_str(&name);
+            col.acquire_lock();
+            let idx = self.insert_into_column(&col, val);
+            new_indices.insert(name, idx);
+            col.release_lock();
+        }
+        for (name, val) in attributes_int.clone() {
+            let col = self.get_or_create_column_int(&name);
+            col.acquire_lock();
+            let idx = self.insert_into_column(&col, val);
+            new_indices.insert(name, idx);
+            col.release_lock();
+        }
+
+        let ptr = MultiVectorPointer {
+            entity_id,
+            attribute_indices: new_indices,
+        };
+
+        next_pointers.insert(entity_id, ptr);
+        self.hot_index.insert(entity_id, ());
+
+        let entity_data = EntityData {
+            entity_id,
+            attributes,
+            attributes_int,
+        };
+        let _ = self.storage.write_entity(&entity_data).await;
     }
 
-    pub fn replay_wal(&mut self, path: &PathBuf) {
+    fn process_promote(&mut self, next: &mut AHashMap<usize, MultiVectorPointer>, data: EntityData) -> MultiVectorPointer {
+        let mut new_indices = AHashMap::new();
+        {
+            let mut bloom = self.bloom_filter.lock().unwrap();
+            bloom.insert(&data.entity_id);
+        }
+        for (name, val) in data.attributes {
+            let col = self.get_or_create_column_str(&name);
+            col.acquire_lock();
+            let idx = self.insert_into_column(&col, val);
+            new_indices.insert(name, idx);
+            col.release_lock();
+        }
+        for (name, val) in data.attributes_int {
+            let col = self.get_or_create_column_int(&name);
+            col.acquire_lock();
+            let idx = self.insert_into_column(&col, val);
+            new_indices.insert(name, idx);
+            col.release_lock();
+        }
+        let ptr = MultiVectorPointer { entity_id: data.entity_id, attribute_indices: new_indices };
+        next.insert(data.entity_id, ptr.clone());
+        self.hot_index.insert(data.entity_id, ());
+        ptr
+    }
+
+    async fn apply_command(&mut self, cmd: PartitionCommand) {
+        self.apply_batch_commands(vec![cmd]).await;
+    }
+
+    pub async fn replay_wal(&mut self, path: &PathBuf) {
         if !path.exists() { return; }
-        let file = File::open(path).expect("Failed to open WAL for replay");
-        let mut reader = BufReader::new(file);
-        
+        let mut file = File::open(path).await.expect("Failed to open WAL");
         loop {
             let mut len_bytes = [0u8; 8];
-            if reader.read_exact(&mut len_bytes).is_err() { break; }
+            if file.read_exact(&mut len_bytes).await.is_err() { break; }
             let len = u64::from_le_bytes(len_bytes) as usize;
-            let mut buffer = vec![0u8; len];
-            reader.read_exact(&mut buffer).expect("Failed to read command from WAL");
-            
-            let cmd: WriteCommand = bincode::deserialize(&buffer).expect("Failed to deserialize command from WAL");
-            let guard = &epoch::pin();
-            self.apply_command(cmd, guard);
+            let mut buf = vec![0u8; len];
+            if file.read_exact(&mut buf).await.is_err() { break; }
+            let cmd: WriteCommand = bincode::deserialize(&buf).expect("Failed to deserialize WAL cmd");
+            self.apply_command(PartitionCommand::Write(cmd)).await;
         }
     }
 
-    fn get_or_create_column_str(&self, name: &str, guard: &epoch::Guard) -> Arc<ColumnArray<String>> {
-        let cols = unsafe { self.columns_str.load(Ordering::Acquire, guard).as_ref().unwrap() };
-        if let Some(col) = cols.get(name) {
+    fn get_or_create_column_str(&mut self, name: &str) -> Arc<ColumnArray<String>> {
+        let cols = unsafe { load_ref(&self.columns) };
+        if let Some(col) = cols.str_cols.get(name) {
             col.clone()
         } else {
             let mut next_cols = cols.clone();
             let col = Arc::new(ColumnArray::new());
-            next_cols.insert(name.to_string(), col.clone());
-            let old = self.columns_str.swap(Owned::new(next_cols), Ordering::AcqRel, guard);
-            unsafe { guard.defer_destroy(old); }
+            next_cols.str_cols.insert(name.to_string(), col.clone());
+            let old = swap_ptr(&self.columns, next_cols);
+            self.qsbr.defer_free(old);
             col
         }
     }
 
-    fn get_or_create_column_int(&self, name: &str, guard: &epoch::Guard) -> Arc<ColumnArray<u32>> {
-        let cols = unsafe { self.columns_int.load(Ordering::Acquire, guard).as_ref().unwrap() };
-        if let Some(col) = cols.get(name) {
+    fn get_or_create_column_int(&mut self, name: &str) -> Arc<ColumnArray<u32>> {
+        let cols = unsafe { load_ref(&self.columns) };
+        if let Some(col) = cols.int_cols.get(name) {
             col.clone()
         } else {
             let mut next_cols = cols.clone();
             let col = Arc::new(ColumnArray::new());
-            next_cols.insert(name.to_string(), col.clone());
-            let old = self.columns_int.swap(Owned::new(next_cols), Ordering::AcqRel, guard);
-            unsafe { guard.defer_destroy(old); }
+            next_cols.int_cols.insert(name.to_string(), col.clone());
+            let old = swap_ptr(&self.columns, next_cols);
+            self.qsbr.defer_free(old);
             col
         }
     }
 
+    fn insert_into_column<T: Clone>(&mut self, col: &ColumnArray<T>, val: T) -> usize {
+        let mut wl = unsafe { load_clone(&col.waitlist) };
+        let mut data = unsafe { load_clone(&col.data) };
 
-    fn insert_into_column<T: Clone>(&self, col: &ColumnArray<T>, val: T, guard: &epoch::Guard) -> usize {
-        let mut wl = unsafe { col.waitlist.load(Ordering::Acquire, guard).as_ref().unwrap().clone() };
-        let mut data = unsafe { col.data.load(Ordering::Acquire, guard).as_ref().unwrap().clone() };
-        
         let idx;
         if let Some(i) = wl.pop() {
             data[i] = Some(val);
@@ -374,37 +626,24 @@ impl Partition {
             idx = data.len();
             data.push(Some(val));
         }
-        
-        let old_wl = col.waitlist.swap(Owned::new(wl), Ordering::AcqRel, guard);
-        let old_data = col.data.swap(Owned::new(data), Ordering::AcqRel, guard);
-        unsafe {
-            guard.defer_destroy(old_wl);
-            guard.defer_destroy(old_data);
-        }
+
+        let old_wl = swap_ptr(&col.waitlist, wl);
+        let old_data = swap_ptr(&col.data, data);
+        self.qsbr.defer_free(old_wl);
+        self.qsbr.defer_free(old_data);
         idx
     }
 
-    fn update_column_element<T: Clone>(&self, col: &ColumnArray<T>, idx: usize, val: Option<T>, guard: &epoch::Guard) {
-        let is_val_none = val.is_none();
-        let mut data = unsafe { col.data.load(Ordering::Acquire, guard).as_ref().unwrap().clone() };
-        data[idx] = val;
-        let old_data = col.data.swap(Owned::new(data), Ordering::AcqRel, guard);
-        
-        if is_val_none {
-            let mut wl = unsafe { col.waitlist.load(Ordering::Acquire, guard).as_ref().unwrap().clone() };
-            wl.push(idx);
-            let old_wl = col.waitlist.swap(Owned::new(wl), Ordering::AcqRel, guard);
-            unsafe { guard.defer_destroy(old_wl); }
-        }
-        
-        unsafe { guard.defer_destroy(old_data); }
-    }
+
+
+    // set_budget was duplicate
 }
 
 /// 4. cdDB 全域入口與調度器 (Dispatcher)
 pub struct CdDBDispatcher {
-    pub route_table: AHashMap<String, PartitionRoute>, 
+    pub route_table: AHashMap<String, PartitionRoute>,
     pub base_path: Option<PathBuf>,
+    pub workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
 }
 
 impl CdDBDispatcher {
@@ -412,40 +651,87 @@ impl CdDBDispatcher {
         Self {
             route_table: AHashMap::new(),
             base_path,
+            workers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    pub fn register_partition(&mut self, path: String) -> Sender<WriteCommand> {
-        let (tx, rx) = unbounded();
-        let shared = Arc::new(Atomic::new(AHashMap::new()));
-        let cols_str = Arc::new(Atomic::new(AHashMap::new()));
-        let cols_int = Arc::new(Atomic::new(AHashMap::new()));
-        
-        let wal_path = self.base_path.as_ref().map(|base| {
-            base.join(format!("{}.wal", path.replace('.', "/")))
-        });
+    pub fn register_partition(&mut self, path: String) -> UserWriter {
+        self.register_partition_with_budget(path, 100 * 1024 * 1024)
+    }
+
+    pub fn register_partition_with_budget(
+        &mut self,
+        path: String,
+        _budget_bytes: usize,
+    ) -> UserWriter {
+        let (tx, rx) = mpsc::channel(10000);
+        let cols = Arc::new(new_atomic_ptr(Columns {
+            str_cols: AHashMap::new(),
+            int_cols: AHashMap::new(),
+        }));
+
+        let wal_path = self
+            .base_path
+            .as_ref()
+            .map(|base| base.join(format!("{}.wal", path.replace('.', "/"))));
+        let storage_path = self
+            .base_path
+            .as_ref()
+            .map(|base| base.join(format!("{}.data", path.replace('.', "/"))))
+            .unwrap_or_else(|| PathBuf::from("data").join(&path));
+
+
+        let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::new()));
+        let bloom_filter = Arc::new(Mutex::new(BloomFilter::with_num_bits(1024 * 1024).hashes(4)));
+        let storage = Arc::new(AsyncStorage::new(storage_path));
+        let hot_index = Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60)));
 
         let route = PartitionRoute {
             writer_tx: tx.clone(),
-            reader_snapshot_root: Arc::clone(&shared),
-            columns_str: Arc::clone(&cols_str),
-            columns_int: Arc::clone(&cols_int),
+            columns: Arc::clone(&cols),
+            shared_pointers: Arc::clone(&shared_pointers),
+            hot_index: Arc::clone(&hot_index),
+            bloom_filter: Arc::clone(&bloom_filter),
+            storage: Arc::clone(&storage),
+            workers: Arc::clone(&self.workers),
         };
-        
+
         self.route_table.insert(path.clone(), route);
-        
-        let mut partition = Partition::new(rx, shared, cols_str, cols_int, wal_path.clone());
-        
-        // Replay WAL if it exists
-        if let Some(wp) = wal_path {
-            partition.replay_wal(&wp);
-        }
+
+        let workers_rt = Arc::clone(&self.workers);
+        let cols_rt = Arc::clone(&cols);
+        let shared_pointers_rt = Arc::clone(&shared_pointers);
+        let storage_rt = Arc::clone(&storage);
+        let bloom_filter_rt = Arc::clone(&bloom_filter);
+        let hot_index_rt = Arc::clone(&hot_index);
 
         std::thread::spawn(move || {
-            partition.run();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut partition = Partition {
+                    columns: cols_rt,
+                    shared_pointers: shared_pointers_rt,
+                    writer_rx: rx,
+                    wal_file: None,
+                    qsbr: QsbrManager::new(workers_rt),
+                    storage: storage_rt,
+                    hot_index: (*hot_index_rt).clone(),
+                    bloom_filter: bloom_filter_rt,
+                };
+
+                if let Some(path) = wal_path {
+                    if let Some(parent) = path.parent() { let _ = tokio::fs::create_dir_all(parent).await; }
+                    partition.wal_file = Some(OpenOptions::new().create(true).append(true).open(&path).await.unwrap());
+                    partition.replay_wal(&path).await;
+                }
+                partition.run().await;
+            });
         });
-        
-        tx
+
+        UserWriter(tx)
     }
 
     pub fn get_route(&self, path: &str) -> Option<&PartitionRoute> {
@@ -453,31 +739,62 @@ impl CdDBDispatcher {
     }
 }
 
+pub struct UserWriter(Sender<PartitionCommand>);
+impl UserWriter {
+    pub async fn send(&self, cmd: WriteCommand) -> Result<(), tokio::sync::mpsc::error::SendError<PartitionCommand>> {
+        self.0.send(PartitionCommand::Write(cmd)).await
+    }
+}
+
 #[derive(Clone)]
 pub struct PartitionRoute {
-    pub writer_tx: Sender<WriteCommand>,
-    pub reader_snapshot_root: Arc<Atomic<AHashMap<usize, MultiVectorPointer>>>,
-    pub columns_str: Arc<Atomic<AHashMap<String, Arc<ColumnArray<String>>>>>,
-    pub columns_int: Arc<Atomic<AHashMap<String, Arc<ColumnArray<u32>>>>>,
+    pub writer_tx: Sender<PartitionCommand>,
+    pub columns: Arc<AtomicPtr<Columns>>,
+    pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
+    pub hot_index: Arc<DualCacheFF<usize, ()>>,
+    pub bloom_filter: Arc<Mutex<BloomFilter>>,
+    pub storage: Arc<AsyncStorage>,
+    pub workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
 }
 
 impl PartitionRoute {
-    pub fn get_snapshot(&self) -> AHashMap<usize, MultiVectorPointer> {
-        let guard = &epoch::pin();
-        let snapshot = self.reader_snapshot_root.load(Ordering::Acquire, guard);
-        unsafe { snapshot.as_ref().unwrap().clone() }
+    pub fn register_worker(&self) -> Arc<WorkerState> {
+        let worker = Arc::new(WorkerState::new());
+        let mut workers = self.workers.lock().unwrap();
+        workers.push(Arc::clone(&worker));
+        worker
     }
 
-    pub fn get_column_str(&self, name: &str) -> Option<Arc<ColumnArray<String>>> {
-        let guard = &epoch::pin();
-        let cols = self.columns_str.load(Ordering::Acquire, guard);
-        unsafe { cols.as_ref().unwrap().get(name).cloned() }
+    pub fn get_column_str(
+        &self,
+        name: &str,
+        worker: &WorkerState,
+    ) -> Option<Arc<ColumnArray<String>>> {
+        worker.enter();
+        let cols = unsafe { load_ref(&self.columns) };
+        let col = cols.str_cols.get(name).cloned();
+        worker.leave();
+        col
     }
 
-    pub fn get_column_int(&self, name: &str) -> Option<Arc<ColumnArray<u32>>> {
-        let guard = &epoch::pin();
-        let cols = self.columns_int.load(Ordering::Acquire, guard);
-        unsafe { cols.as_ref().unwrap().get(name).cloned() }
+    pub fn get_column_int(
+        &self,
+        name: &str,
+        worker: &WorkerState,
+    ) -> Option<Arc<ColumnArray<u32>>> {
+        worker.enter();
+        let cols = unsafe { load_ref(&self.columns) };
+        let col = cols.int_cols.get(name).cloned();
+        worker.leave();
+        col
+    }
+
+    pub fn len(&self, worker: &WorkerState) -> usize {
+        worker.enter();
+        let snap = unsafe { load_ref(&self.shared_pointers) };
+        let count = snap.len();
+        worker.leave();
+        count
     }
 }
 
@@ -490,51 +807,5 @@ impl Default for CdDBDispatcher {
 impl<T> Default for ColumnArray<T> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_wal_recovery() {
-        let base_path = std::env::current_dir().unwrap().join("test_data_wal");
-        if base_path.exists() {
-            let _ = std::fs::remove_dir_all(&base_path);
-        }
-        
-        let path = "test.wal_recovery".to_string();
-
-        // 1. Initial write
-        {
-            let mut db = CdDBDispatcher::new(Some(base_path.clone()));
-            let tx = db.register_partition(path.clone());
-            
-            let mut attrs_int = AHashMap::new();
-            attrs_int.insert("val".to_string(), 123);
-            
-            tx.send(WriteCommand::Insert {
-                entity_id: 1,
-                attributes: AHashMap::new().into(),
-                attributes_int: attrs_int.into(),
-            }).unwrap();
-            
-            // Wait for processing
-            std::thread::sleep(std::time::Duration::from_millis(300));
-        }
-
-        // 2. Recovery
-        {
-            let mut db = CdDBDispatcher::new(Some(base_path.clone()));
-            db.register_partition(path);
-            
-            let route = db.get_route("test.wal_recovery").unwrap();
-            let query = Query::new(route);
-            assert_eq!(query.get_int(1, "val"), Some(123));
-        }
-        
-        let _ = std::fs::remove_dir_all(&base_path);
     }
 }

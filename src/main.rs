@@ -3,7 +3,8 @@ use ahash::AHashMap;
 use std::thread;
 use std::time::Duration;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut db = CdDBDispatcher::new(Some("data".into()));
 
     // 1. Create a partition for "Food.Apple"
@@ -21,34 +22,34 @@ fn main() {
         entity_id: 1,
         attributes: attrs.into(),
         attributes_int: attrs_int.into(),
-    }).unwrap();
+    }).await.unwrap();
 
     // Wait a bit for the background thread to process
-    thread::sleep(Duration::from_millis(100));
+    thread::sleep(Duration::from_millis(300));
 
     // 3. Read data using the new Query interface
     if let Some(route) = db.get_route("Food.Apple") {
         let query = Query::new(route);
         println!("Entity 1 access via Query:");
         
-        if let Some(country) = query.get_str(1, "Country") {
+        if let Some(country) = query.get_str(1, "Country").await {
             println!("  - Country: {}", country);
         }
         
-        if let Some(price) = query.get_int(1, "Price") {
+        if let Some(price) = query.get_int(1, "Price").await {
             println!("  - Price: {}", price);
         }
     }
 
     // 4. Delete data
     println!("\n--- Step 2: Deleting Entity 1 ---");
-    writer_tx.send(WriteCommand::Delete { entity_id: 1 }).unwrap();
+    writer_tx.send(WriteCommand::Delete { entity_id: 1 }).await.unwrap();
     
     thread::sleep(Duration::from_millis(100));
 
     if let Some(route) = db.get_route("Food.Apple") {
         let query = Query::new(route);
-        if query.get_str(1, "Country").is_none() {
+        if query.get_str(1, "Country").await.is_none() {
             println!("Entity 1 successfully deleted (verified via Query).");
         }
     }
@@ -60,20 +61,21 @@ fn main() {
         entity_id: 2,
         attributes: attrs2.into(),
         attributes_int: AHashMap::new().into(),
-    }).unwrap();
+    }).await.unwrap();
 
     thread::sleep(Duration::from_millis(100));
     
     if let Some(route) = db.get_route("Food.Apple") {
         let query = Query::new(route);
-        if let Some(country) = query.get_str(2, "Country") {
+        if let Some(country) = query.get_str(2, "Country").await {
             println!("Entity 2: Country = {}", country);
         }
         
         // Check waitlist via internal access if needed (just for demo)
-        if let Some(col) = route.get_column_str("Country") {
-            println!("  - Column waitlist size: {}", col.get_waitlist_snapshot().len());
-            println!("  - Column data size: {}", col.data_len());
+        let worker = route.register_worker();
+        if let Some(col) = route.get_column_str("Country", &worker) {
+            println!("  - Column waitlist size: {}", col.get_waitlist_snapshot(&worker).len());
+            println!("  - Column data size: {}", col.data_len(&worker));
         }
     }
 }
