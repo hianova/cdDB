@@ -9,42 +9,45 @@ cdDB 旨在打造一個極致效能的「全記憶體加速層」，同時具備
     *   **寫入**：採用 Single-Writer 模式，由單一執行緒負責。透過 **Group Commit (微批次)** 優化，將多個寫入指令合併為單次 RCU Swap 與 WAL 寫入。
     *   **讀取**：基於自定義 **QSBR (Quiescent State Based Reclamation)** 實現 **Wait-Free** 讀取。讀取端絕對零打工，延遲低至 200ns。
 *   **分層儲存 (Tiered Storage 2.0)**：
-    *   整合 **DualCache-FF** 引擎取代鐘擺驅逐，實現 O(1) 的超高速熱度追蹤。
+    *   整合 **DualCache-FF (v0.1.0)** 引擎，實現 O(1) 的超高速熱度追蹤。
     *   **I/O 硬化 (Storage Hardening)**：
-        *   **Page Cache & Block Fetching**：磁碟讀取以 Block 為單位，解決 I/O 放大問題。
+        *   **Page Cache & Block Pre-fetching**：磁碟讀取時自動預取下一個 Block (Double Fetching)，解決 I/O 放大並隱藏磁碟延遲。
         *   **Async I/O**：使用非同步讀取避免 Worker 執行緒阻塞。
-        *   **Bloom Filter**：記憶體過濾無效查詢，防止快照穿透。
+        *   **Dynamic Bloom Filter**：動態擴縮容的布隆過濾器。當飽和度達到 70% 時自動翻倍並從磁碟重建，有效防止快照穿透。
 
 ---
 
-## 2. 核心資料結構 (Core Data Structures)
+## 2. 系統架構與模組 (System Architecture)
 
-### 2.1 基礎列陣列 (ColumnArray)
+cdDB 已完成模組化拆分，以提升可維護性：
+
+- **`column.rs`**: 核心列式儲存資料結構 (`Columns`, `ColumnArray`)。
+- **`commands.rs`**: 內部指令與寫入協議 (`WriteCommand`, `PartitionCommand`)。
+- **`query.rs`**: 非同步查詢引擎與多維指標跳轉邏輯。
+- **`partition.rs`**: 分區 Actor 核心，負責 RCU 狀態維護與 RCU Swap。
+- **`dispatcher.rs`**: 全域分發器與路由管理。
+- **`unsafe_core.rs`**: **安全性封裝層**。所有 `unsafe` 操作集中於此，對外提供安全封裝 API。
+
+### 2.1 核心資料結構
+
+#### ColumnArray
 ```rust
 pub struct ColumnArray<T> {
-    pub data: Atomic<Vec<Option<T>>>,    // 核心資料陣列
-    pub waitlist: Atomic<Vec<usize>>,    // Tombstone 空間回收
-    pub(crate) write_guard: AtomicBool,  // 單寫入者安全檢查
+    pub data: AtomicPtr<Vec<Option<T>>>,    // 核心資料陣列
+    pub waitlist: AtomicPtr<Vec<usize>>,    // Tombstone 空間回收
+    pub(crate) write_guard: AtomicBool,      // 單寫入者安全檢查
 }
 ```
 
-### 2.2 查詢引擎 IR (Query Engine IR)
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum QueryNode {
-    Get { entity_id: usize, attr: String },                      // 精準取值
-    Link { from_id: usize, link_attr: String, target: String },  // 多重指標跳轉
-    Range { entity_id: usize, attr: String, len: usize },        // 範圍掃描
-}
-```
-
-### 2.3 分區與管理 (Partition & Management)
+#### Partition
 ```rust
 pub struct Partition {
-    pub columns: Arc<AtomicPtr<Columns>>, // 包含 Str/Int 列
-    pub hot_index: DualCacheFF<usize, MultiVectorPointer>, // 熱資料索引
-    pub bloom_filter: BloomFilter,       // 快照穿透過濾
-    pub storage: AsyncStorage,           // 非同步持久層
+    pub columns: Arc<AtomicPtr<Columns>>,
+    pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
+    pub storage: Arc<AsyncStorage>,
+    pub hot_index: DualCacheFF<usize, ()>,
+    pub bloom_filter: Arc<Mutex<BloomFilter>>,
+    pub wal_file: Option<File>,
 }
 ```
 
@@ -52,29 +55,34 @@ pub struct Partition {
 
 ## 3. 關鍵流程分析 (Key Workflows)
 
-### 3.1 寫入優化：Group Commit (微批次提交)
-1.  **收集**：Partition 執行緒使用 `try_iter()` 快速收集 Channel 中排隊的所有指令。
-2.  **批次 WAL**：將所有指令一次性序列化並寫入 WAL 文件，調用單次 `flush()`。
-3.  **單次 RCU Swap**：在複製快照並套用所有變更後，僅執行一次 `Atomic::swap`，最小化 RCU 頻繁切換帶來的開銷。
+### 3.1 寫入優化：Batch WAL & Group Commit
+1.  **指令收集**：Partition 執行緒批次獲取 Channel 中排隊的所有指令 (一次最多 1000 條)。
+2.  **批次 WAL**：將所有寫入指令序列化後合併為單次 `write_all` 調用，最後調用單次 `flush()`，顯著降低系統調用開銷。
+3.  **單次 RCU Swap**：在複製快照並套用批次變更後，執行一次 `swap_ptr`，並由 `QsbrManager` 延後回收舊指標。
 
-### 3.2 讀取路徑：Wait-Free + Bloom Filter
-1.  **Bloom Check**：首先通過 Bloom Filter，若不存在則直接返回 None (20ns)。
-2.  **QSBR 打卡**：Reader 透過 `WorkerState` 在 `GLOBAL_EPOCH` 註冊。
-3.  **Cache Hit**：查詢 `DualCache-FF`。若命中，直接從記憶體獲取 `MultiVectorPointer`。
-4.  **Async Load**：若快取未命中，觸發非同步磁碟讀取。Worker 不阻塞，將請求掛起或返回 `Pending`。
-5.  **Block Fetch**：載入目標實體時，一併將同 Page 的鄰近資料載入快取。
-6.  **QSBR 登出**：讀取結束。
+### 3.2 讀取路徑：Wait-Free + Pre-fetching
+1.  **Bloom Check**：快速過濾不存在的實體。
+2.  **Memory Index**：透過 Wait-Free RCU 指標快速查找。若命中熱資料，延遲 < 300ns。
+3.  **Page Fault & Pre-fetch**：若未命中，觸發非同步磁碟讀取。載入當前實體時，自動預取下一個 32 實體大小的 Block，優化連續掃描效能。
 
-### 3.3 空間回收：Tombstone + Waitlist
-*   刪除資料時將 `ColumnArray` 中的索引設為 `None`。
-*   將該索引回收至 `waitlist`。
-*   下次寫入時優先從 `waitlist` 提取索引重複使用，避免陣列不斷增長。
+### 3.3 動態布隆過濾器重建
+*   當 `bloom_count > (bits * 0.7)` 時，系統會自動啟動重建流程。
+*   容量翻倍 (`bits *= 2`)，並掃描資料目錄下的所有實體文件重新填入。
 
 ---
 
-## 4. 效能指標總結 (Performance Benchmarks)
+## 4. 安全性與封裝 (Safety & Encapsulation)
 
-*   **讀取輸送量 (Throughput)**：~2.4 Million QPS (8 Reader Threads)
-*   **讀取延遲 (Latency P50)**：~208 ns
-*   **冷資料延遲 (Page Fault)**：~1.2 ms (模擬 SSD)
-*   **尾部延遲穩定性 (Wait-Free)**：P99 延遲僅為 P50 的 4 倍，證明自定義 QSBR 在高壓下依然穩定。
+cdDB 遵循 **Edition 2024** 的嚴格安全規範：
+*   **Unsafe Archive**：所有底層指標操作、RCU 載入與釋放邏輯均歸檔於 `unsafe_core.rs`。
+*   **Safe Wrappers**：提供 `load_ref` 與 `load_clone` 等安全封裝，確保上層邏輯 (Partition, Query) 無須編寫 `unsafe` 代碼。
+*   **Encapsulated GC**：`GarbageEntry` 內部實作 `Drop` 封裝 `Box::from_raw`，確保垃圾回收過程對管理層透明且安全。
+
+---
+
+## 5. 效能指標總結 (Performance Benchmarks)
+
+*   **讀取輸送量 (Throughput)**：~2.5 Million QPS (8 Reader Threads)
+*   **冷資料提升效能**：~28x (Disk to Memory Promotion benefit)
+*   **列式掃描優勢**：~7x (Columnar vs Traditional Struct Scan)
+*   **尾部延遲穩定性**：P99 延遲穩定，證明 Wait-Free 架構在 Batch 寫入壓力下依然保持極速響應。

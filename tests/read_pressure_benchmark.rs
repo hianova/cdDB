@@ -22,11 +22,11 @@ async fn test_read_pressure_benchmark() {
     }
     
     let start_load = Instant::now();
-    tx.send(WriteCommand::BatchInsert(batch)).unwrap();
+    tx.send(WriteCommand::BatchInsert(batch)).await.unwrap();
     
     let route = db.get_route("bench.pressure").unwrap();
     let worker = route.register_worker();
-    while route.get_snapshot(&worker).len() < count {
+    while route.len(&worker) < count {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     println!("  - Data Prep Done ({} entities): {:?}", count, start_load.elapsed());
@@ -44,12 +44,10 @@ async fn test_read_pressure_benchmark() {
     for _ in 0..num_threads {
         let r = route.clone();
         let handle = tokio::spawn(async move {
-            let mut rng = rand::thread_rng();
             let query_engine = Query::new(&r);
             let mut latencies = Vec::with_capacity(ops_per_thread);
-            
             for _ in 0..ops_per_thread {
-                let entity_id = rng.gen_range(0..count - 100);
+                let entity_id = rand::thread_rng().gen_range(0..count - 100);
                 
                 // Construct a mixed query
                 let query = CdDbQuery {
@@ -64,7 +62,7 @@ async fn test_read_pressure_benchmark() {
                 };
                 
                 let start_op = Instant::now();
-                let results = query_engine.execute(query);
+                let results = query_engine.execute(query).await;
                 let duration = start_op.elapsed();
                 
                 black_box(results);

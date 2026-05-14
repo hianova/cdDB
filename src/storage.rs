@@ -13,7 +13,7 @@ pub struct EntityData {
 }
 
 pub struct AsyncStorage {
-    base_path: PathBuf,
+    pub base_path: PathBuf,
 }
 
 impl AsyncStorage {
@@ -46,9 +46,11 @@ impl AsyncStorage {
         let start_id = (entity_id / block_size) * block_size;
         let mut block_data = Vec::new();
         
-        // 並行讀取鄰近實體 (模擬 Block Fetch)
+        // 並行讀取鄰近實體 (模擬 Block Fetch + Pre-fetching)
+        // 我們讀取當前塊以及下一個塊
+        let fetch_size = block_size * 2;
         let mut handles = vec![];
-        for i in 0..block_size {
+        for i in 0..fetch_size {
             let id = start_id + i;
             let path = self.base_path.join(format!("entity_{}.bin", id));
             handles.push(tokio::spawn(async move {

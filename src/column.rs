@@ -1,0 +1,97 @@
+use ahash::AHashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use crate::unsafe_core::{load_clone, load_ref, new_atomic_ptr};
+use crate::qsbr::WorkerState;
+
+/// 0. 核心列集合 (Columns Snapshot)
+#[derive(Clone)]
+pub struct Columns {
+    pub str_cols: AHashMap<String, Arc<ColumnArray<String>>>,
+    pub int_cols: AHashMap<String, Arc<ColumnArray<u32>>>,
+}
+
+/// 1. 最底層的連續資料陣列 (Column / DOD 結構)
+///
+/// 使用自定義 QSBR 實現 Wait-Free 讀取
+pub struct ColumnArray<T> {
+    pub data: AtomicPtr<Vec<Option<T>>>,
+    pub waitlist: AtomicPtr<Vec<usize>>,
+    pub(crate) write_guard: AtomicBool,
+}
+
+impl<T> ColumnArray<T> {
+    pub fn new() -> Self {
+        Self {
+            data: new_atomic_ptr(Vec::new()),
+            waitlist: new_atomic_ptr(Vec::new()),
+            write_guard: AtomicBool::new(false),
+        }
+    }
+
+    pub fn acquire_lock(&self) {
+        if self.write_guard.swap(true, Ordering::SeqCst) {
+            panic!(
+                "Data Race Detected: Multiple writers attempted to access the same ColumnArray!"
+            );
+        }
+    }
+
+    pub fn release_lock(&self) {
+        self.write_guard.store(false, Ordering::SeqCst);
+    }
+
+    pub fn get_element(&self, idx: usize, worker: &WorkerState) -> Option<T>
+    where
+        T: Clone,
+    {
+        worker.enter();
+        let data = load_ref(&self.data);
+        let val = data.get(idx).and_then(|v| v.clone());
+        worker.leave();
+        val
+    }
+
+    pub fn get_data_snapshot(&self, worker: &WorkerState) -> Vec<Option<T>>
+    where
+        T: Clone,
+    {
+        worker.enter();
+        let data = load_clone(&self.data);
+        worker.leave();
+        data
+    }
+
+    pub fn get_waitlist_snapshot(&self, worker: &WorkerState) -> Vec<usize> {
+        worker.enter();
+        let wl = load_clone(&self.waitlist);
+        worker.leave();
+        wl
+    }
+
+    pub fn data_len(&self, worker: &WorkerState) -> usize {
+        worker.enter();
+        let data = load_ref(&self.data);
+        let len = data.len();
+        worker.leave();
+        len
+    }
+
+    /// Optimized: Enter QSBR once for multiple reads
+    pub fn with_data<F, R>(&self, worker: &WorkerState, f: F) -> R
+    where
+        F: FnOnce(&Vec<Option<T>>) -> R,
+    {
+        worker.enter();
+        let data = load_ref(&self.data);
+        let res = f(data);
+        worker.leave();
+        res
+    }
+}
+
+impl<T> Default for ColumnArray<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}

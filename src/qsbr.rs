@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use crate::unsafe_core::GarbageEntry;
 
 /// 全域邏輯時鐘
 pub static GLOBAL_EPOCH: AtomicUsize = AtomicUsize::new(1);
@@ -30,23 +31,11 @@ impl WorkerState {
     }
 }
 
-/// 垃圾條目：待釋放的指標與其被替換時的全域 Epoch
-pub struct GarbageEntry {
-    pub ptr: *mut (),
-    pub epoch: usize,
-    pub drop_fn: unsafe fn(*mut ()),
-}
-
-unsafe impl Send for GarbageEntry {}
-unsafe impl Sync for GarbageEntry {}
-
 /// QSBR 管理器：追蹤所有 Worker 並執行垃圾回收
 pub struct QsbrManager {
     workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
     garbage: Vec<GarbageEntry>,
 }
-
-unsafe impl Send for QsbrManager {}
 
 impl QsbrManager {
     pub fn new(workers: Arc<Mutex<Vec<Arc<WorkerState>>>>) -> Self {
@@ -60,17 +49,10 @@ impl QsbrManager {
     pub fn defer_free<T>(&mut self, ptr: *mut T) {
         if ptr.is_null() { return; }
         
-        unsafe fn drop_ptr<T>(p: *mut ()) {
-            unsafe {
-                let _ = Box::from_raw(p as *mut T);
-            }
-        }
-
-        self.garbage.push(GarbageEntry {
-            ptr: ptr as *mut (),
-            epoch: GLOBAL_EPOCH.load(Ordering::Relaxed),
-            drop_fn: drop_ptr::<T>,
-        });
+        self.garbage.push(GarbageEntry::new(
+            ptr,
+            GLOBAL_EPOCH.load(Ordering::Relaxed),
+        ));
     }
 
     /// 執行維護：推進 Epoch 並清理過期的垃圾
@@ -91,15 +73,7 @@ impl QsbrManager {
         }
 
         // 3. 清理：如果垃圾的 Epoch < min_active，代表沒有 Worker 在看它
-        self.garbage.retain(|entry| {
-            if entry.epoch < min_active {
-                unsafe { (entry.drop_fn)(entry.ptr); }
-                false
-            } else {
-                true
-            }
-        });
+        // GarbageEntry implements Drop, so retain(false) will trigger the drop logic.
+        self.garbage.retain(|entry| entry.epoch >= min_active);
     }
 }
-
-
