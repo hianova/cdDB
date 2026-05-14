@@ -26,6 +26,7 @@ cdDB 已完成模組化拆分，以提升可維護性：
 - **`query.rs`**: 非同步查詢引擎與多維指標跳轉邏輯。
 - **`partition.rs`**: 分區 Actor 核心，負責 RCU 狀態維護與 RCU Swap。
 - **`dispatcher.rs`**: 全域分發器與路由管理。
+- **`ops.rs`**: **IT 運營資訊處理介面**。提供結構化的監控數據與日誌注入介面。
 - **`unsafe_core.rs`**: **安全性封裝層**。所有 `unsafe` 操作集中於此，對外提供安全封裝 API。
 
 ### 2.1 核心資料結構
@@ -84,5 +85,14 @@ cdDB 遵循 **Edition 2024** 的嚴格安全規範：
 
 *   **讀取輸送量 (Throughput)**：~2.5 Million QPS (8 Reader Threads)
 *   **冷資料提升效能**：~28x (Disk to Memory Promotion benefit)
-*   **列式掃描優勢**：~7x (Columnar vs Traditional Struct Scan)
+*   **列式掃描優勢**：~17x (Columnar vs Traditional Struct Scan)
 *   **尾部延遲穩定性**：P99 延遲穩定，證明 Wait-Free 架構在 Batch 寫入壓力下依然保持極速響應。
+
+---
+
+## 6. IT 運營資訊處理 (IT Operations Processing)
+
+cdDB 專為 IT 運營監控設計了結構化介面：
+- **`ITOpsRecord`**: 支援自動化的 CPU/Memory 佔用率縮放存儲 (Scaled u32)。
+- **時序屬性**: 自動映射時間戳記與服務節點資訊。
+- **高併發注入**: 透過 `ITOpsIngest` 擴展，實現秒級百萬級數據點的無鎖注入。

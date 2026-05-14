@@ -10,6 +10,7 @@
 - **High-Performance WAL Batching**: Optimized Write-Ahead Log that groups multiple commands into a single disk I/O operation.
 - **Tiered Storage Engine**: Powered by **DualCache-FF (0.1.0)**, supporting automatic promotion of "cold" disk-resident data into "hot" in-memory columnar caches.
 - **Read-Block Pre-fetching**: Intelligent I/O optimization that fetches subsequent data blocks to hide disk latency during sequential scans.
+- **IT Operations Optimized**: Dedicated interface for ingesting and querying system monitoring data and logs.
 - **Unsafe Encapsulation**: Strictly audited `unsafe` code centralized in a dedicated core module for maximum reliability.
 
 ## 🏗 Architecture
@@ -21,7 +22,8 @@
 3.  **Query (`query.rs`)**: High-speed query engine supporting point lookups, multi-vector links, and range scans.
 4.  **Column (`column.rs`)**: Low-level Data-Oriented Design (DOD) structures for high-cache-locality storage.
 5.  **Storage (`storage.rs`)**: Asynchronous disk I/O layer managing persistent entity blocks.
-6.  **Unsafe Core (`unsafe_core.rs`)**: The safety boundary containing all manual pointer management and atomic operations.
+6.  **Ops (`ops.rs`)**: High-level interface for IT operations data ingestion and management.
+7.  **Unsafe Core (`unsafe_core.rs`)**: The safety boundary containing all manual pointer management and atomic operations.
 
 ## 🛠 Getting Started
 
@@ -74,15 +76,15 @@ Measures the efficiency gain when data is promoted from Disk to Memory.
 ```bash
 cargo test --test cold_data_benchmark -- --nocapture
 ```
-**Latest Results:** ~28x speedup on promoted data scans.
+**Latest Results:** ~26.5x speedup on promoted data scans.
 
 ### Running the Read Throughput Benchmark
 Validates Columnar vs Struct scan performance.
 ```bash
 cargo test --test read_benchmark -- --nocapture
 ```
-**Latest Results:** ~7x speedup using Columnar Layout.
+**Latest Results:** ~17x speedup using Columnar Layout.
 
 ## 📜 License
 
-PolyForm Noncommercial License 1.0
+This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.

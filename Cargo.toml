@@ -2,6 +2,21 @@
 name = "cdDB"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+authors = ["hianova"]
+description = "A high-performance asynchronous tiered storage engine for cold data acceleration."
+readme = "ReadMe.md"
+repository = "https://github.com/hianova/cdDB"
+keywords = ["storage", "async", "tiered-storage", "dod", "monitoring"]
+categories = ["database-implementations", "data-structures"]
+
+[lib]
+name = "cdDB"
+path = "src/lib.rs"
+
+[[example]]
+name = "it_ops_demo"
+path = "examples/it_ops_demo.rs"
 
 [dependencies]
 ahash = { version = "0.8", features = ["serde"] }
