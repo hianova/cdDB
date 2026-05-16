@@ -2,14 +2,14 @@ use cdDB::{CdDBDispatcher, WriteCommand, Attributes, Query, CdDbQuery, QueryNode
 use std::time::{Instant, Duration};
 use rand::Rng;
 use std::hint::black_box;
+use std::thread;
 
-#[tokio::test]
-async fn test_read_pressure_benchmark() {
+#[test]
+fn test_read_pressure_benchmark() {
     println!("\n=== cdDB Read Pressure Benchmark (Wait-Free & Multi-threaded) ===");
     
-    // 1. Preload 1,000,000 entities
-    // Use a count that fits in memory for this environment
-    let count = 10_000; // Adjusted for environment stability
+    // 1. Preload entities
+    let count = 10_000; 
     let mut db = CdDBDispatcher::new(None);
     let tx = db.register_partition("bench.pressure".to_string());
     
@@ -22,17 +22,17 @@ async fn test_read_pressure_benchmark() {
     }
     
     let start_load = Instant::now();
-    tx.send(WriteCommand::BatchInsert(batch)).await.unwrap();
+    tx.send(WriteCommand::BatchInsert(batch)).unwrap();
     
     let route = db.get_route("bench.pressure").unwrap();
     let worker = route.register_worker();
     while route.len(&worker) < count {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        thread::sleep(Duration::from_millis(100));
     }
     println!("  - Data Prep Done ({} entities): {:?}", count, start_load.elapsed());
     
     // 2. Stabilization
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    thread::sleep(Duration::from_secs(1));
     
     // 3. Multi-threaded Read Bombing
     let num_threads = 8;
@@ -43,7 +43,7 @@ async fn test_read_pressure_benchmark() {
     
     for _ in 0..num_threads {
         let r = route.clone();
-        let handle = tokio::spawn(async move {
+        let handle = thread::spawn(move || {
             let query_engine = Query::new(&r);
             let mut latencies = Vec::with_capacity(ops_per_thread);
             for _ in 0..ops_per_thread {
@@ -62,7 +62,7 @@ async fn test_read_pressure_benchmark() {
                 };
                 
                 let start_op = Instant::now();
-                let results = query_engine.execute(query).await;
+                let results = query_engine.execute(query);
                 let duration = start_op.elapsed();
                 
                 black_box(results);
@@ -75,7 +75,7 @@ async fn test_read_pressure_benchmark() {
     
     let mut all_latencies = Vec::with_capacity(num_threads * ops_per_thread);
     for h in handles {
-        let lats = h.await.unwrap();
+        let lats = h.join().unwrap();
         all_latencies.extend(lats);
     }
     
@@ -98,7 +98,6 @@ async fn test_read_pressure_benchmark() {
     println!("  - Latency P99.9:    {:?}", p999);
     
     // Verify wait-free property: P99 shouldn't be significantly worse than P50
-    // (In a Wait-Free system, there's no lock contention to cause massive tail latency)
     println!("\nWait-Free Analysis:");
     println!("  - Tail factor (P99/P50): {:.2}x", p99.as_secs_f64() / p50.as_secs_f64());
 }

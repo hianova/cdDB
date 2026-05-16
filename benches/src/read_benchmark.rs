@@ -1,5 +1,6 @@
 use cdDB::{CdDBDispatcher, WriteCommand, Query, Attributes};
 use std::time::{Instant, Duration};
+use std::thread;
 use ahash::AHashMap;
 
 #[derive(Clone)]
@@ -8,8 +9,8 @@ struct TraditionalStruct {
     val: u32,
 }
 
-#[tokio::test]
-async fn test_read_performance_benchmark() {
+#[test]
+fn test_read_performance_benchmark() {
     println!("\n=== cdDB Fair Performance Audit (100,000 Entities) ===");
     
     let count = 100_000;
@@ -33,11 +34,11 @@ async fn test_read_performance_benchmark() {
         vec_struct.push(s);
     }
     
-    tx.send(WriteCommand::BatchInsert(batch)).await.unwrap();
+    tx.send(WriteCommand::BatchInsert(batch)).unwrap();
     let route = db.get_route("bench.read").unwrap();
     let worker = route.register_worker();
     while route.len(&worker) < count {
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        thread::sleep(Duration::from_millis(50));
     }
     println!("  - Data Preparation Complete.");
 
@@ -83,7 +84,7 @@ async fn test_read_performance_benchmark() {
     let start_d = Instant::now();
     let mut sum_d = 0u64;
     for i in 0..scan_size {
-        if let Some(v) = query.get_int(start_idx + i, "val").await {
+        if let Some(v) = query.get_int(start_idx + i, "val") {
             sum_d += v as u64;
         }
     }
@@ -106,13 +107,13 @@ async fn test_read_performance_benchmark() {
     // Test F: cdDB Query API Misses (Bloom Filter)
     let start_f = Instant::now();
     for i in 0..scan_size {
-        let _ = query.get_int(non_existent_start + i, "val").await;
+        let _ = query.get_int(non_existent_start + i, "val");
     }
     let dur_f = start_f.elapsed();
     println!("  - cdDB Bloom Misses:   {:?}", dur_f);
 
     println!("\n--- Audit Conclusion ---");
     println!("1. Scan Efficiency: cdDB is {:.2}x faster than Vec<Struct> (DOD benefit)", dur_b.as_secs_f64() / dur_a.as_secs_f64());
-    println!("2. Lookup Overhead: cdDB Query API is {:.2}x slower than HashMap (Async/Security overhead)", dur_d.as_secs_f64() / dur_c.as_secs_f64());
+    println!("2. Lookup Overhead: cdDB Query API is {:.2}x slower than HashMap (Sync/Security overhead)", dur_d.as_secs_f64() / dur_c.as_secs_f64());
     println!("3. Bloom Impact:    cdDB Misses are {:.2}x slower/faster than HashMap Misses", dur_f.as_secs_f64() / dur_e.as_secs_f64());
 }

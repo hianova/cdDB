@@ -2,9 +2,10 @@ use cdDB::{
     AggregateOp, Attributes, CdDBDispatcher, CdDbQuery, Query, QueryNode, QueryResult, WriteCommand,
 };
 use std::time::Duration;
+use std::thread;
 
-#[tokio::test]
-async fn test_olap_vectorized_queries() {
+#[test]
+fn test_olap_vectorized_queries() {
     println!("\n=== cdDB OLAP Vectorized Queries Test ===");
 
     let mut db = CdDBDispatcher::new(None);
@@ -19,14 +20,14 @@ async fn test_olap_vectorized_queries() {
         attrs_int.insert("even".to_string(), (i % 2 == 0) as u32);
         batch.push((i, Attributes::new(), attrs_int));
     }
-    tx.send(WriteCommand::BatchInsert(batch)).await.unwrap();
+    tx.send(WriteCommand::BatchInsert(batch)).unwrap();
 
     let route = db.get_route("olap.test").unwrap();
     let worker = route.register_worker();
 
     // Wait for data to be applied
     while route.len(&worker) < count {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        thread::sleep(Duration::from_millis(10));
     }
 
     let query_engine = Query::new(route);
@@ -38,7 +39,7 @@ async fn test_olap_vectorized_queries() {
             attr: "val".to_string(),
         }],
     };
-    let results = query_engine.execute(scan_query).await;
+    let results = query_engine.execute(scan_query);
     if let QueryResult::IntList(list) = &results[0] {
         assert_eq!(list.len(), count);
         assert_eq!(list[0], 0);
@@ -56,7 +57,7 @@ async fn test_olap_vectorized_queries() {
             op: AggregateOp::Sum,
         }],
     };
-    let results = query_engine.execute(sum_query).await;
+    let results = query_engine.execute(sum_query);
     if let QueryResult::IntSum(sum) = results[0] {
         let expected_sum = (0..count as u64).sum::<u64>();
         assert_eq!(sum, expected_sum);
@@ -73,7 +74,7 @@ async fn test_olap_vectorized_queries() {
             op: AggregateOp::Avg,
         }],
     };
-    let results = query_engine.execute(avg_query).await;
+    let results = query_engine.execute(avg_query);
     if let QueryResult::IntAvg(avg) = results[0] {
         let expected_avg = (count - 1) as f64 / 2.0;
         assert_eq!(avg, expected_avg);
@@ -100,19 +101,19 @@ async fn test_olap_vectorized_queries() {
             },
         ],
     };
-    let results = query_engine.execute(mix_query).await;
-    if let (QueryResult::IntMin(min), QueryResult::IntMax(max), QueryResult::Count(c)) =
-        (&results[0], &results[1], &results[2])
-    {
-        assert_eq!(*min, 0);
-        assert_eq!(*max, 99);
-        assert_eq!(*c, 100);
-        println!(
-            "  - Min/Max/Count success: min={}, max={}, count={}",
-            min, max, c
-        );
-    } else {
-        panic!("Mixed aggregate failed");
+    let results = query_engine.execute(mix_query);
+    
+    match (&results[0], &results[1], &results[2]) {
+        (QueryResult::IntMin(min), QueryResult::IntMax(max), QueryResult::Count(c)) => {
+            assert_eq!(*min, 0);
+            assert_eq!(*max, 99);
+            assert_eq!(*c, 100);
+            println!(
+                "  - Min/Max/Count success: min={}, max={}, count={}",
+                min, max, c
+            );
+        }
+        _ => panic!("Mixed aggregate failed"),
     }
 
     println!("=== OLAP Test Passed ===\n");

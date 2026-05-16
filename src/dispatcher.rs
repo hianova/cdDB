@@ -2,8 +2,7 @@ use ahash::AHashMap;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicPtr;
 use std::path::PathBuf;
-use tokio::sync::mpsc::{self, Sender};
-use tokio::fs::OpenOptions;
+use crossbeam_channel::{unbounded, Sender};
 use fastbloom::BloomFilter;
 use dualcache_ff::{Config, DualCacheFF};
 
@@ -11,7 +10,7 @@ use crate::column::{Columns, ColumnArray};
 use crate::commands::{PartitionCommand, WriteCommand};
 use crate::partition::{MultiVectorPointer, Partition};
 use crate::qsbr::{QsbrManager, WorkerState};
-use crate::storage::AsyncStorage;
+use crate::storage::Storage;
 use crate::unsafe_core::new_atomic_ptr;
 
 /// 4. cdDB 全域入口與調度器 (Dispatcher)
@@ -39,7 +38,7 @@ impl CdDBDispatcher {
         path: String,
         _budget_bytes: usize,
     ) -> UserWriter {
-        let (tx, rx) = mpsc::channel(10000);
+        let (tx, rx) = unbounded();
         let cols = Arc::new(new_atomic_ptr(Columns {
             str_cols: AHashMap::new(),
             int_cols: AHashMap::new(),
@@ -58,7 +57,7 @@ impl CdDBDispatcher {
 
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::new()));
         let bloom_filter = Arc::new(Mutex::new(BloomFilter::with_num_bits(1024 * 1024).hashes(4)));
-        let storage = Arc::new(AsyncStorage::new(storage_path));
+        let storage = Arc::new(Storage::new(storage_path));
         let hot_index = Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60)));
 
         let route = PartitionRoute {
@@ -81,31 +80,25 @@ impl CdDBDispatcher {
         let hot_index_rt = Arc::clone(&hot_index);
 
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async {
-                let mut partition = Partition {
-                    columns: cols_rt,
-                    shared_pointers: shared_pointers_rt,
-                    writer_rx: rx,
-                    wal_file: None,
-                    qsbr: QsbrManager::new(workers_rt),
-                    storage: storage_rt,
-                    hot_index: (*hot_index_rt).clone(),
-                    bloom_filter: bloom_filter_rt,
-                    bloom_count: 0,
-                    bloom_bits: 1024 * 1024,
-                };
+            let mut partition = Partition {
+                columns: cols_rt,
+                shared_pointers: shared_pointers_rt,
+                writer_rx: rx,
+                wal_file: None,
+                qsbr: QsbrManager::new(workers_rt),
+                storage: storage_rt,
+                hot_index: (*hot_index_rt).clone(),
+                bloom_filter: bloom_filter_rt,
+                bloom_count: 0,
+                bloom_bits: 1024 * 1024,
+            };
 
-                if let Some(path) = wal_path {
-                    if let Some(parent) = path.parent() { let _ = tokio::fs::create_dir_all(parent).await; }
-                    partition.wal_file = Some(OpenOptions::new().create(true).append(true).open(&path).await.unwrap());
-                    partition.replay_wal(&path).await;
-                }
-                partition.run().await;
-            });
+            if let Some(path) = wal_path {
+                if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+                partition.wal_file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
+                partition.replay_wal(&path);
+            }
+            partition.run();
         });
 
         UserWriter(tx)
@@ -124,8 +117,8 @@ impl Default for CdDBDispatcher {
 
 pub struct UserWriter(Sender<PartitionCommand>);
 impl UserWriter {
-    pub async fn send(&self, cmd: WriteCommand) -> Result<(), tokio::sync::mpsc::error::SendError<PartitionCommand>> {
-        self.0.send(PartitionCommand::Write(cmd)).await
+    pub fn send(&self, cmd: WriteCommand) -> Result<(), crossbeam_channel::SendError<PartitionCommand>> {
+        self.0.send(PartitionCommand::Write(cmd))
     }
 }
 
@@ -136,7 +129,7 @@ pub struct PartitionRoute {
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
     pub hot_index: Arc<DualCacheFF<usize, ()>>,
     pub bloom_filter: Arc<Mutex<BloomFilter>>,
-    pub storage: Arc<AsyncStorage>,
+    pub storage: Arc<Storage>,
     pub workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
 }
 

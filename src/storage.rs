@@ -1,9 +1,7 @@
 use std::path::PathBuf;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::fs::{File, self};
+use std::io::{Read, Write};
 use serde::{Serialize, Deserialize};
-
-
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EntityData {
@@ -12,60 +10,59 @@ pub struct EntityData {
     pub attributes_int: crate::Attributes<u32>,
 }
 
-pub struct AsyncStorage {
+/// Helper for hex encoding/decoding binary payloads
+pub struct PayloadCodec;
+
+impl PayloadCodec {
+    pub fn encode(data: &[u8]) -> String {
+        hex::encode(data)
+    }
+
+    pub fn decode(hex_str: &str) -> Result<Vec<u8>, hex::FromHexError> {
+        hex::decode(hex_str)
+    }
+}
+
+pub struct Storage {
     pub base_path: PathBuf,
 }
 
-impl AsyncStorage {
+impl Storage {
     pub fn new(base_path: PathBuf) -> Self {
-        let _ = std::fs::create_dir_all(&base_path);
+        let _ = fs::create_dir_all(&base_path);
         Self { base_path }
     }
 
-    /// 將實體寫入持久層 (簡單實現：每個 Entity 一個位置，實務中會用 SSTable)
-    pub async fn write_entity(&self, data: &EntityData) -> tokio::io::Result<()> {
+    /// 將實體寫入持久層 (同步實現，避免 Tokio 執行緒池開銷)
+    pub fn write_entity(&self, data: &EntityData) -> std::io::Result<()> {
         let path = self.base_path.join(format!("entity_{}.bin", data.entity_id));
-        let mut file = File::create(path).await?;
-        let bytes = bincode::serialize(data).map_err(|e| tokio::io::Error::new(tokio::io::ErrorKind::Other, e))?;
-        file.write_all(&bytes).await?;
+        let mut file = File::create(path)?;
+        let bytes = bincode::serialize(data).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        file.write_all(&bytes)?;
+        file.flush()?;
         Ok(())
     }
 
-    /// 讀取實體 (觸發 Page Fault 時調用)
-    pub async fn read_entity(&self, entity_id: usize) -> tokio::io::Result<EntityData> {
+    /// 讀取實體 (同步實現)
+    pub fn read_entity(&self, entity_id: usize) -> std::io::Result<EntityData> {
         let path = self.base_path.join(format!("entity_{}.bin", entity_id));
-        let mut file = File::open(path).await?;
+        let mut file = File::open(path)?;
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).await?;
-        let data: EntityData = bincode::deserialize(&bytes).map_err(|e| tokio::io::Error::new(tokio::io::ErrorKind::Other, e))?;
+        file.read_to_end(&mut bytes)?;
+        let data: EntityData = bincode::deserialize(&bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         Ok(data)
     }
 
-    /// 塊狀讀取 (Block Fetching)：同時讀取鄰近的實體
-    pub async fn read_block(&self, entity_id: usize, block_size: usize) -> Vec<EntityData> {
+    /// 塊狀讀取 (同步實現)
+    pub fn read_block(&self, entity_id: usize, block_size: usize) -> Vec<EntityData> {
         let start_id = (entity_id / block_size) * block_size;
         let mut block_data = Vec::new();
         
-        // 並行讀取鄰近實體 (模擬 Block Fetch + Pre-fetching)
-        // 我們讀取當前塊以及下一個塊
+        // 同步讀取鄰近實體
         let fetch_size = block_size * 2;
-        let mut handles = vec![];
         for i in 0..fetch_size {
             let id = start_id + i;
-            let path = self.base_path.join(format!("entity_{}.bin", id));
-            handles.push(tokio::spawn(async move {
-                if let Ok(mut file) = File::open(path).await {
-                    let mut bytes = Vec::new();
-                    if file.read_to_end(&mut bytes).await.is_ok() {
-                        return bincode::deserialize::<EntityData>(&bytes).ok();
-                    }
-                }
-                None
-            }));
-        }
-
-        for h in handles {
-            if let Ok(Some(data)) = h.await {
+            if let Ok(data) = self.read_entity(id) {
                 block_data.push(data);
             }
         }

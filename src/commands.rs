@@ -1,6 +1,6 @@
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use crossbeam_channel::Sender;
 use crate::partition::MultiVectorPointer;
 
 /// 寫入指令屬性封裝
@@ -50,12 +50,12 @@ pub enum WriteCommand {
     },
 }
 
-/// 內部指令列舉 (非同步溝通用)
+/// 內部指令列舉 (同步溝通用)
 #[derive(Debug)]
 pub enum PartitionCommand {
     Write(WriteCommand),
     InternalLoad {
         entity_id: usize,
-        response_tx: oneshot::Sender<Option<MultiVectorPointer>>,
+        response_tx: Sender<Option<MultiVectorPointer>>,
     },
 }

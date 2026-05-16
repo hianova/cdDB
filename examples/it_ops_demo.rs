@@ -2,8 +2,7 @@ use cdDB::{CdDBDispatcher, WriteCommand, Query, ITOpsRecord, LogLevel};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[tokio::main]
-async fn main() {
+fn main() {
     println!("=== cdDB IT Operations Interface Demo ===");
     
     // Initialize dispatcher
@@ -33,7 +32,7 @@ async fn main() {
         entity_id: 1001,
         attributes: attrs,
         attributes_int: attrs_int,
-    }).await.unwrap();
+    }).unwrap();
 
     // Wait for async processing
     thread::sleep(Duration::from_millis(300));
@@ -43,15 +42,15 @@ async fn main() {
         let query = Query::new(route);
         println!("\nQuerying back Ops data for Entity 1001:");
         
-        if let Some(service) = query.get_str(1001, "service").await {
+        if let Some(service) = query.get_str(1001, "service") {
             println!("  - Service: {}", service);
         }
         
-        if let Some(cpu) = query.get_int(1001, "cpu_milli").await {
+        if let Some(cpu) = query.get_int(1001, "cpu_milli") {
             println!("  - CPU Usage: {}%", cpu as f32 / 10.0);
         }
 
-        if let Some(msg) = query.get_str(1001, "message").await {
+        if let Some(msg) = query.get_str(1001, "message") {
             println!("  - Message: {}", msg);
         }
     }

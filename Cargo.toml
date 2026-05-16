@@ -1,6 +1,6 @@
 [package]
 name = "cdDB"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 authors = ["hianova"]
@@ -26,4 +26,13 @@ tokio = { version = "1", features = ["full"] }
 rand = "0.8"
 fastbloom = "0.6"
 dualcache-ff = "0.1.0" 
+crossbeam-channel = "0.5"
+hex = "0.4"
 futures = "0.3"
+
+[workspace]
+members = [
+    "tests",
+    "benches",
+]
+resolver = "2"

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
+use crossbeam_channel::bounded;
 use crate::partition::MultiVectorPointer;
 use crate::dispatcher::PartitionRoute;
 use crate::qsbr::WorkerState;
@@ -75,14 +75,14 @@ impl<'a> Query<'a> {
         Self { route, worker }
     }
 
-    pub async fn execute(&self, query: CdDbQuery) -> Vec<QueryResult> {
+    pub fn execute(&self, query: CdDbQuery) -> Vec<QueryResult> {
         let mut results = Vec::new();
         for node in query.nodes {
             match node {
                 QueryNode::Get { entity_id, attr } => {
-                    if let Some(v) = self.get_int(entity_id, &attr).await {
+                    if let Some(v) = self.get_int(entity_id, &attr) {
                         results.push(QueryResult::Int(v));
-                    } else if let Some(v) = self.get_str(entity_id, &attr).await {
+                    } else if let Some(v) = self.get_str(entity_id, &attr) {
                         results.push(QueryResult::Str(v));
                     } else {
                         results.push(QueryResult::None);
@@ -93,11 +93,11 @@ impl<'a> Query<'a> {
                     link_attr,
                     target_attr,
                 } => {
-                    if let Some(target_id) = self.get_int(from_entity_id, &link_attr).await {
+                    if let Some(target_id) = self.get_int(from_entity_id, &link_attr) {
                         let target_id = target_id as usize;
-                        if let Some(v) = self.get_int(target_id, &target_attr).await {
+                        if let Some(v) = self.get_int(target_id, &target_attr) {
                             results.push(QueryResult::Int(v));
-                        } else if let Some(v) = self.get_str(target_id, &target_attr).await {
+                        } else if let Some(v) = self.get_str(target_id, &target_attr) {
                             results.push(QueryResult::Str(v));
                         } else {
                             results.push(QueryResult::None);
@@ -112,7 +112,7 @@ impl<'a> Query<'a> {
                     len,
                 } => {
                     // Range scan usually happens on hot data or specific blocks
-                    if let Some(ptr) = self.get_pointer(entity_id).await {
+                    if let Some(ptr) = self.get_pointer(entity_id) {
                         if let Some(&start_idx) = ptr.attribute_indices.get(&attr) {
                             if let Some(col) = self.route.get_column_int(&attr, &self.worker) {
                                 let range_vals = col.with_data(&self.worker, |data| {
@@ -187,7 +187,7 @@ impl<'a> Query<'a> {
         results
     }
 
-    async fn get_pointer(&self, entity_id: usize) -> Option<MultiVectorPointer> {
+    fn get_pointer(&self, entity_id: usize) -> Option<MultiVectorPointer> {
         // 1. Bloom Filter Check
         {
             let bloom = self.route.bloom_filter.lock().unwrap();
@@ -208,18 +208,18 @@ impl<'a> Query<'a> {
             }
         }
 
-        // 3. Page Fault (Async Disk Load)
-        let (tx, rx) = oneshot::channel();
+        // 3. Page Fault (Synchronous Disk Load)
+        let (tx, rx) = bounded(1);
         let _ = self.route.writer_tx.send(PartitionCommand::InternalLoad {
             entity_id,
             response_tx: tx,
-        }).await;
+        });
         
-        rx.await.unwrap_or(None)
+        rx.recv().unwrap_or(None)
     }
 
-    pub async fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
-        if let Some(ptr) = self.get_pointer(entity_id).await {
+    pub fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
+        if let Some(ptr) = self.get_pointer(entity_id) {
             if let Some(&idx) = ptr.attribute_indices.get(attr) {
                 return self
                     .route
@@ -230,8 +230,8 @@ impl<'a> Query<'a> {
         None
     }
 
-    pub async fn get_int(&self, entity_id: usize, attr: &str) -> Option<u32> {
-        if let Some(ptr) = self.get_pointer(entity_id).await {
+    pub fn get_int(&self, entity_id: usize, attr: &str) -> Option<u32> {
+        if let Some(ptr) = self.get_pointer(entity_id) {
             if let Some(&idx) = ptr.attribute_indices.get(attr) {
                 return self
                     .route
@@ -242,24 +242,12 @@ impl<'a> Query<'a> {
         None
     }
 
-    pub async fn async_sum_int_range(&self, attr: &str, entity_ids: Vec<usize>) -> u64 {
-        use futures::future::join_all;
-        let futures: Vec<_> = entity_ids
-            .into_iter()
-            .map(|id| self.get_int(id, attr))
-            .collect();
-        let results = join_all(futures).await;
-        results.into_iter().flatten().map(|v| v as u64).sum()
-    }
-
     pub fn seed_bloom_filter(&self, entity_id: usize) {
         let mut bloom = self.route.bloom_filter.lock().unwrap();
         bloom.insert(&entity_id);
     }
 
     pub fn entities(&self) -> Vec<usize> {
-        // Since we use Bloom Filter and DualCacheFF, we don't have a simple list of all entities in memory.
-        // In a real system, we'd query the persistent index.
         Vec::new()
     }
 

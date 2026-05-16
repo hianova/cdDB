@@ -1,0 +1,13 @@
+[package]
+name = "cdDB-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cdDB = { path = ".." }
+tokio = { version = "1", features = ["full"] }
+
+[[test]]
+name = "olap_test"
+path = "src/olap_test.rs"

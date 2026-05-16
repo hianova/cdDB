@@ -15,5 +15,5 @@ pub use partition::{MultiVectorPointer, Partition};
 pub use query::{QueryNode, AggregateOp, CdDbQuery, QueryResult, Query};
 pub use dispatcher::{CdDBDispatcher, UserWriter, PartitionRoute};
 pub use qsbr::{QsbrManager, WorkerState};
-pub use storage::{AsyncStorage, EntityData};
+pub use storage::{Storage, EntityData};
 pub use ops::{ITOpsRecord, LogLevel, ITOpsIngest};

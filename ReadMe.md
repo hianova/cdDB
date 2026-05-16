@@ -1,29 +1,25 @@
-# cdDB: High-Performance Asynchronous Tiered Storage Engine
+# cdDB: High-Performance Synchronous Tiered Storage Engine
 
-`cdDB` is a research-grade, high-performance storage engine built in Rust, designed for extreme concurrency and low-latency data access. It leverages modern system programming patterns such as the **Actor Model**, **Read-Copy-Update (RCU)**, and **Tiered Storage** to provide a robust foundation for data-intensive applications.
+`cdDB` is a research-grade, high-performance storage engine built in Rust, designed for extreme concurrency and low-latency data access. It leverages a **Wait-Free Synchronous Architecture**, **Read-Copy-Update (RCU)**, and **Tiered Storage** to provide a robust foundation for data-intensive applications like IT operations monitoring and real-time analytics.
 
 ## 🚀 Key Features
 
-- **Asynchronous Actor Architecture**: Decoupled command processing using `tokio` mpsc channels, ensuring non-blocking write paths.
-- **Lock-Free Read Path**: Uses RCU (Read-Copy-Update) with **QSBR (Quiescent State Based Reclamation)** for safe, zero-lock memory management on the read path.
+- **Zero-Async Tax Architecture**: Optimized for performance by using native OS threads and synchronous I/O, eliminating the overhead of asynchronous runtime executors.
+- **Wait-Free Read Path**: Uses RCU (Read-Copy-Update) with **QSBR (Quiescent State Based Reclamation)** for safe, zero-lock memory management. Read latency is as low as **~115ns**.
+- **Extreme Throughput**: Achieves **32,000,000+ QPS** on a 4-core configuration for memory-resident data.
 - **Dynamic Bloom Filter Scaling**: Automatically resizes and rebuilds the bloom filter from disk when saturation reaches 70%, preventing index misses.
-- **High-Performance WAL Batching**: Optimized Write-Ahead Log that groups multiple commands into a single disk I/O operation.
-- **Tiered Storage Engine**: Powered by **DualCache-FF (0.1.0)**, supporting automatic promotion of "cold" disk-resident data into "hot" in-memory columnar caches.
-- **Read-Block Pre-fetching**: Intelligent I/O optimization that fetches subsequent data blocks to hide disk latency during sequential scans.
-- **IT Operations Optimized**: Dedicated interface for ingesting and querying system monitoring data and logs.
-- **Unsafe Encapsulation**: Strictly audited `unsafe` code centralized in a dedicated core module for maximum reliability.
+- **High-Performance WAL Batching**: Optimized Write-Ahead Log that groups multiple commands into a single disk I/O operation via **Group Commit**.
+- **Tiered Storage 2.0**: Powered by **DualCache-FF (0.1.0)**, supporting automatic promotion of "cold" disk-resident data into "hot" in-memory columnar caches.
+- **IT Operations Optimized**: Dedicated interface for ingesting and querying system monitoring data and logs with scaled metrics support.
 
-## 🏗 Architecture
+## 🏗 Project Structure
 
-`cdDB` is logically split into focused modules:
+`cdDB` is organized as a workspace for maximum modularity:
 
-1.  **Dispatcher (`dispatcher.rs`)**: Central entry point for partition routing and worker registration.
-2.  **Partition (`partition.rs`)**: The core actor handling the RCU state, WAL persistence, and data promotion.
-3.  **Query (`query.rs`)**: High-speed query engine supporting point lookups, multi-vector links, and range scans.
-4.  **Column (`column.rs`)**: Low-level Data-Oriented Design (DOD) structures for high-cache-locality storage.
-5.  **Storage (`storage.rs`)**: Asynchronous disk I/O layer managing persistent entity blocks.
-6.  **Ops (`ops.rs`)**: High-level interface for IT operations data ingestion and management.
-7.  **Unsafe Core (`unsafe_core.rs`)**: The safety boundary containing all manual pointer management and atomic operations.
+- **`src/`**: The core library containing the storage logic, RCU state management, and query engine.
+- **`tests/`**: Dedicated crate for functional and boundary testing.
+- **`benches/`**: Professional performance audit suite using Criterion.
+- **`examples/`**: Usage demonstrations (e.g., `it_ops_demo`).
 
 ## 🛠 Getting Started
 
@@ -33,57 +29,56 @@ Add `cdDB` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cdDB = { path = "../path/to/cdDB" }
+cdDB = { git = "https://github.com/hianova/cdDB" }
 ```
 
-### Basic Usage
+### Basic Usage (Synchronous)
 
 ```rust
 use cdDB::{CdDBDispatcher, WriteCommand, Query, Attributes};
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Initialize the dispatcher with a base path for persistence
     let mut db = CdDBDispatcher::new(Some("data_dir".into()));
     
-    // Register a partition
+    // Register a partition (Spawns a native worker thread)
     let tx = db.register_partition("users.active".to_string());
     let route = db.get_route("users.active").unwrap();
     
-    // Asynchronous Insert
+    // Synchronous Insert (Wait-Free Enqueue)
     let mut attrs = Attributes::new();
     attrs.insert("score".to_string(), 100u32);
     tx.send(WriteCommand::Insert {
         entity_id: 1,
         attributes: Attributes::new(),
         attributes_int: attrs,
-    }).await.unwrap();
+    }).unwrap();
 
     // Query data (Wait-Free RCU read)
     let query = Query::new(route);
-    if let Some(score) = query.get_int(1, "score").await {
+    if let Some(score) = query.get_int(1, "score") {
         println!("User score: {}", score);
     }
 }
 ```
 
-## 📊 Benchmarking
+## 📊 Performance & Benchmarking
 
-`cdDB` includes specialized benchmarks to validate its tiered storage performance.
+`cdDB` includes a comprehensive benchmarking suite to validate its performance claims.
 
-### Running the Cold Data Benchmark
-Measures the efficiency gain when data is promoted from Disk to Memory.
+### Running Benchmarks
 ```bash
-cargo test --test cold_data_benchmark -- --nocapture
+# Run throughput and latency benchmarks
+cargo bench -p cdDB-benches
 ```
-**Latest Results:** ~26.5x speedup on promoted data scans.
 
-### Running the Read Throughput Benchmark
-Validates Columnar vs Struct scan performance.
-```bash
-cargo test --test read_benchmark -- --nocapture
-```
-**Latest Results:** ~17x speedup using Columnar Layout.
+### Latest Audit Results
+- **Read Throughput**: ~32M QPS (4 Threads)
+- **Random Access Latency**: ~115ns (Hot Path)
+- **Cold Data Promotion**: ~330x speedup after memory promotion.
+- **Columnar Advantage**: ~8.9x faster than traditional struct scans.
+
+For detailed metrics, see [perf_report.md](perf_report.md).
 
 ## 📜 License
 
