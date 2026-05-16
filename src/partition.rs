@@ -1,13 +1,21 @@
 use ahash::AHashMap;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicPtr;
-use std::path::PathBuf;
-use std::fs::{File, OpenOptions, self};
-use std::io::{Read, Write};
-use serde::{Deserialize, Serialize};
-use crossbeam_channel::Receiver;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use core::sync::atomic::AtomicPtr;
+use crate::platform::FileSystem;
+
+#[cfg(feature = "std")]
+use std::sync::Mutex;
+#[cfg(not(feature = "std"))]
+use spin::Mutex;
+
+#[cfg(feature = "std")]
+use std::sync::mpsc::Receiver;
+
 use dualcache_ff::DualCacheFF;
-use fastbloom::BloomFilter;
+use crate::bloom::SimpleBloom;
 
 use crate::column::Columns;
 use crate::commands::{Attributes, PartitionCommand, WriteCommand};
@@ -16,7 +24,7 @@ use crate::storage::{Storage, EntityData};
 use crate::unsafe_core::{load_clone, new_atomic_ptr, swap_ptr};
 
 /// 2. 多向量指針快照 (RCU Snapshot)
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct MultiVectorPointer {
     pub entity_id: usize,
     pub attribute_indices: AHashMap<String, usize>,
@@ -26,65 +34,56 @@ pub struct MultiVectorPointer {
 pub struct Partition {
     pub columns: Arc<AtomicPtr<Columns>>,
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
-    pub writer_rx: Receiver<PartitionCommand>,
+    pub writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
     pub qsbr: QsbrManager,
 
     // 持久層與快照
     pub storage: Arc<Storage>,
     pub hot_index: DualCacheFF<usize, ()>, // Just for heat tracking
-    pub bloom_filter: Arc<Mutex<BloomFilter>>,
+    pub bloom_filter: Arc<Mutex<SimpleBloom>>,
 
     // WAL 支援
-    pub wal_file: Option<File>,
+    pub wal_path: Option<String>,
     pub bloom_count: usize,
     pub bloom_bits: usize,
+    pub fs: Arc<dyn FileSystem>,
 }
 
 impl Partition {
     pub fn new(
-        writer_rx: Receiver<PartitionCommand>,
+        writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
         columns: Arc<AtomicPtr<Columns>>,
-        wal_path: Option<PathBuf>,
+        wal_path: Option<String>,
         workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
-        storage_path: PathBuf,
+        storage_path: String,
+        fs: Arc<dyn FileSystem>,
+        shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
+        bloom_filter: Arc<Mutex<SimpleBloom>>,
     ) -> Self {
-        let wal_file = if let Some(path) = wal_path {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            Some(OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .expect("Failed to open WAL file"))
-        } else {
-            None
-        };
-
-        let storage = Arc::new(Storage::new(storage_path));
+        let storage = Arc::new(Storage::new(storage_path, fs.clone()));
         let bloom_bits = 1024 * 1024;
-        let bloom_filter = Arc::new(Mutex::new(
-            BloomFilter::with_num_bits(bloom_bits).hashes(4),
-        ));
-        let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::new()));
 
         Self {
             columns,
             shared_pointers,
             writer_rx,
-            wal_file,
+            wal_path,
             qsbr: QsbrManager::new(workers),
             storage,
             hot_index: DualCacheFF::new(dualcache_ff::Config::with_memory_budget(100, 60)),
             bloom_filter,
             bloom_count: 0,
             bloom_bits,
+            fs,
         }
     }
 
     fn update_bloom(&mut self, entity_id: usize) {
         {
+            #[cfg(feature = "std")]
             let mut bloom = self.bloom_filter.lock().unwrap();
+            #[cfg(not(feature = "std"))]
+            let mut bloom = self.bloom_filter.lock();
             bloom.insert(&entity_id);
             self.bloom_count += 1;
         }
@@ -95,33 +94,45 @@ impl Partition {
     }
 
     fn rebuild_bloom_filter(&mut self) {
-        let old_bits = self.bloom_bits;
-        self.bloom_bits *= 2;
-        println!("[cdDB] Resizing Bloom Filter: {} -> {} bits", old_bits, self.bloom_bits);
-        let mut new_bloom = BloomFilter::with_num_bits(self.bloom_bits).hashes(4);
-        let mut count = 0;
+        #[cfg(feature = "std")]
+        {
+            let old_bits = self.bloom_bits;
+            self.bloom_bits *= 2;
+            let mut new_bloom = SimpleBloom::new(self.bloom_bits);
+            let mut count = 0;
 
-        if let Ok(entries) = fs::read_dir(&self.storage.base_path) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().into_string().unwrap_or_default();
-                if name.starts_with("entity_") && name.ends_with(".bin") {
-                    if let Ok(id) = name[7..name.len() - 4].parse::<usize>() {
-                        new_bloom.insert(&id);
-                        count += 1;
+            if let Ok(names) = self.fs.read_dir(&self.storage.base_path) {
+                for name in names {
+                    if name.starts_with("entity_") && name.ends_with(".bin") {
+                        if let Ok(id) = name[7..name.len() - 4].parse::<usize>() {
+                            new_bloom.insert(&id);
+                            count += 1;
+                        }
                     }
                 }
             }
-        }
 
-        let mut bloom = self.bloom_filter.lock().unwrap();
-        *bloom = new_bloom;
-        self.bloom_count = count;
+            let mut bloom = self.bloom_filter.lock().unwrap();
+            *bloom = new_bloom;
+            self.bloom_count = count;
+        }
     }
 
     pub fn run(mut self) {
-        while let Ok(cmd) = self.writer_rx.recv() {
+        loop {
+            let cmd_res = self.writer_rx.recv();
+            #[cfg(feature = "std")]
+            let cmd = match cmd_res {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+            #[cfg(not(feature = "std"))]
+            let cmd = match cmd_res {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+
             let mut commands = vec![cmd];
-            // Batch processing: drain up to 1000 more commands
             for _ in 0..1000 {
                 if let Ok(next) = self.writer_rx.try_recv() {
                     commands.push(next);
@@ -130,19 +141,18 @@ impl Partition {
                 }
             }
 
-            if let Some(ref mut file) = self.wal_file {
+            if let Some(ref path) = self.wal_path {
                 let mut batch_bytes = Vec::new();
                 for cmd in &commands {
                     if let PartitionCommand::Write(wcmd) = cmd {
-                        let bytes = bincode::serialize(wcmd).expect("Failed to serialize command");
-                        let len = bytes.len() as u64;
+                        let bytes = wcmd.encode();
+                        let len = bytes.len() as u32;
                         batch_bytes.extend_from_slice(&len.to_le_bytes());
                         batch_bytes.extend_from_slice(&bytes);
                     }
                 }
                 if !batch_bytes.is_empty() {
-                    file.write_all(&batch_bytes).expect("Failed to write batch to WAL");
-                    file.flush().expect("Failed to flush WAL");
+                    let _ = self.fs.append(path, &batch_bytes);
                 }
             }
 
@@ -157,12 +167,12 @@ impl Partition {
         for cmd in commands {
             match cmd {
                 PartitionCommand::Write(wcmd) => match wcmd {
-                    WriteCommand::Insert { entity_id, attributes, attributes_int } => {
-                        self.process_insert(&mut next_pointers, entity_id, attributes, attributes_int);
+                    WriteCommand::Insert { entity_id, attributes, attributes_int, attributes_blob } => {
+                        self.process_insert(&mut next_pointers, entity_id, attributes, attributes_int, attributes_blob);
                     }
                     WriteCommand::BatchInsert(batch) => {
-                        for (entity_id, attributes, attributes_int) in batch {
-                            self.process_insert(&mut next_pointers, entity_id, attributes, attributes_int);
+                        for (entity_id, attributes, attributes_int, attributes_blob) in batch {
+                            self.process_insert(&mut next_pointers, entity_id, attributes, attributes_int, attributes_blob);
                         }
                     }
                     WriteCommand::Delete { entity_id } => {
@@ -196,6 +206,7 @@ impl Partition {
         entity_id: usize,
         attributes: Attributes<String>,
         attributes_int: Attributes<u32>,
+        attributes_blob: Attributes<Vec<u8>>,
     ) {
         let mut new_indices = AHashMap::new();
 
@@ -205,14 +216,21 @@ impl Partition {
             let col = self.get_or_create_column_str(&name);
             col.acquire_lock();
             let idx = self.insert_into_column(&col, val);
-            new_indices.insert(name, idx);
+            new_indices.insert(name.to_string(), idx);
             col.release_lock();
         }
         for (name, val) in attributes_int.clone() {
             let col = self.get_or_create_column_int(&name);
             col.acquire_lock();
             let idx = self.insert_into_column(&col, val);
-            new_indices.insert(name, idx);
+            new_indices.insert(name.to_string(), idx);
+            col.release_lock();
+        }
+        for (name, val) in attributes_blob.clone() {
+            let col = self.get_or_create_column_blob(&name);
+            col.acquire_lock();
+            let idx = self.insert_into_column(&col, val);
+            new_indices.insert(name.to_string(), idx);
             col.release_lock();
         }
 
@@ -228,6 +246,7 @@ impl Partition {
             entity_id,
             attributes,
             attributes_int,
+            attributes_blob,
         };
         let _ = self.storage.write_entity(&entity_data);
     }
@@ -239,14 +258,21 @@ impl Partition {
             let col = self.get_or_create_column_str(&name);
             col.acquire_lock();
             let idx = self.insert_into_column(&col, val);
-            new_indices.insert(name, idx);
+            new_indices.insert(name.to_string(), idx);
             col.release_lock();
         }
         for (name, val) in data.attributes_int {
             let col = self.get_or_create_column_int(&name);
             col.acquire_lock();
             let idx = self.insert_into_column(&col, val);
-            new_indices.insert(name, idx);
+            new_indices.insert(name.to_string(), idx);
+            col.release_lock();
+        }
+        for (name, val) in data.attributes_blob {
+            let col = self.get_or_create_column_blob(&name);
+            col.acquire_lock();
+            let idx = self.insert_into_column(&col, val);
+            new_indices.insert(name.to_string(), idx);
             col.release_lock();
         }
         let ptr = MultiVectorPointer { entity_id: data.entity_id, attribute_indices: new_indices };
@@ -259,17 +285,32 @@ impl Partition {
         self.apply_batch_commands(vec![cmd]);
     }
 
-    pub fn replay_wal(&mut self, path: &PathBuf) {
-        if !path.exists() { return; }
-        let mut file = File::open(path).expect("Failed to open WAL");
-        loop {
-            let mut len_bytes = [0u8; 8];
-            if file.read_exact(&mut len_bytes).is_err() { break; }
-            let len = u64::from_le_bytes(len_bytes) as usize;
-            let mut buf = vec![0u8; len];
-            if file.read_exact(&mut buf).is_err() { break; }
-            let cmd: WriteCommand = bincode::deserialize(&buf).expect("Failed to deserialize WAL cmd");
-            self.apply_command(PartitionCommand::Write(cmd));
+    fn log_wal(&mut self, cmd: &WriteCommand) {
+        if let Some(path) = &self.wal_path {
+            let bytes = cmd.encode();
+            let mut batch = Vec::new();
+            let len = bytes.len() as u32;
+            batch.extend_from_slice(&len.to_le_bytes());
+            batch.extend_from_slice(&bytes);
+            let _ = self.fs.append(path, &batch);
+        }
+    }
+
+    pub fn replay_wal(&mut self, path: &String) {
+        if let Ok(bytes) = self.fs.read(path) {
+            let mut pos = 0;
+            while pos + 4 <= bytes.len() {
+                let len = u32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap()) as usize;
+                pos += 4;
+                if pos + len <= bytes.len() {
+                    if let Some(cmd) = WriteCommand::decode(&bytes[pos..pos+len]) {
+                        self.apply_command(PartitionCommand::Write(cmd));
+                    }
+                    pos += len;
+                } else {
+                    break;
+                }
+            }
         }
     }
 
@@ -295,6 +336,20 @@ impl Partition {
             let mut next_cols = cols.clone();
             let col = Arc::new(crate::column::ColumnArray::new());
             next_cols.int_cols.insert(name.to_string(), col.clone());
+            let old = swap_ptr(&self.columns, next_cols);
+            self.qsbr.defer_free(old);
+            col
+        }
+    }
+
+    fn get_or_create_column_blob(&mut self, name: &str) -> Arc<crate::column::ColumnArray<Vec<u8>>> {
+        let cols = crate::unsafe_core::load_ref(&self.columns);
+        if let Some(col) = cols.blob_cols.get(name) {
+            col.clone()
+        } else {
+            let mut next_cols = cols.clone();
+            let col = Arc::new(crate::column::ColumnArray::new());
+            next_cols.blob_cols.insert(name.to_string(), col.clone());
             let old = swap_ptr(&self.columns, next_cols);
             self.qsbr.defer_free(old);
             col

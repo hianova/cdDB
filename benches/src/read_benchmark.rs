@@ -17,7 +17,7 @@ fn test_read_performance_benchmark() {
     let scan_size = 10_000;
     
     // 1. Prepare Data
-    let mut db = CdDBDispatcher::new(None);
+    let mut db = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("bench.read".to_string());
     
     let mut batch = Vec::with_capacity(count);
@@ -27,7 +27,7 @@ fn test_read_performance_benchmark() {
     for i in 0..count {
         let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), i as u32);
-        batch.push((i, Attributes::new(), attrs_int));
+        batch.push((i, Attributes::new(), attrs_int, Attributes::new()));
 
         let s = TraditionalStruct { id: i, val: i as u32 };
         hash_map.insert(i, s.clone());

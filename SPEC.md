@@ -15,6 +15,9 @@ cdDB 旨在打造一個極致效能的「全記憶體加速層」，同時具備
         *   **Block Pre-fetching**：讀取時自動預取下一個 Block，隱藏磁碟延遲。
         *   **Dynamic Bloom Filter**：動態擴縮容。當飽和度達 70% 時自動翻倍並重建，有效防止快照穿透。
 
+*   **NoStd 架構 (Embedded Ready)**：全面解耦 `std` 依賴。透過 `platform.rs` 提供的抽象介面，cdDB 可以在無作業系統的嵌入式環境或自定義核心中運行。
+*   **平台抽象層 (Platform Abstraction Layer)**：定義了 `FileSystem`、`ThreadManager` 與 `MessageQueue` Trait，將 I/O 與執行緒管理從具體系統實現中分離。
+
 ---
 
 ## 2. 系統架構與模組 (System Architecture)

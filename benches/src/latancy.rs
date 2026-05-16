@@ -1,10 +1,10 @@
 use cdDB::{CdDBDispatcher, WriteCommand, Query, Attributes};
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion, black_box};
 use std::thread;
 use std::time::Duration;
 
 fn latency_benchmark(c: &mut Criterion) {
-    let mut db = CdDBDispatcher::new(None);
+    let mut db = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("bench.latency".to_string());
     
     let count = 10_000;
@@ -12,7 +12,7 @@ fn latency_benchmark(c: &mut Criterion) {
     for i in 0..count {
         let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), i as u32);
-        batch.push((i, Attributes::new(), attrs_int));
+        batch.push((i, Attributes::new(), attrs_int, Attributes::new()));
     }
     tx.send(WriteCommand::BatchInsert(batch)).unwrap();
     
@@ -29,7 +29,8 @@ fn latency_benchmark(c: &mut Criterion) {
     group.bench_function("Hot Path Get Int (Wait-Free RCU)", |b| {
         let mut i = 0;
         b.iter(|| {
-            let _ = query_engine.get_int(i % count, "val");
+            let result = query_engine.get_int(black_box(i % count), black_box("val"));
+            black_box(result);
             i += 1;
         });
     });
@@ -37,7 +38,8 @@ fn latency_benchmark(c: &mut Criterion) {
     group.bench_function("Bloom Filter Miss", |b| {
         let mut i = count + 1000;
         b.iter(|| {
-            let _ = query_engine.get_int(i, "val");
+            let result = query_engine.get_int(black_box(i), black_box("val"));
+            black_box(result);
             i += 1;
         });
     });

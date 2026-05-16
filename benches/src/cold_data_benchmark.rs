@@ -17,14 +17,14 @@ fn test_cold_data_scan_performance() {
     
     // 1. Initial Ingestion
     {
-        let mut db = CdDBDispatcher::new(Some(base_path.clone()));
+        let mut db = CdDBDispatcher::new_std(Some(base_path.to_string_lossy().to_string()));
         let tx = db.register_partition("cold.bench".to_string());
         
         let mut batch = Vec::with_capacity(count);
         for i in 0..count {
             let mut attrs_int = Attributes::new();
             attrs_int.insert("val".to_string(), i as u32);
-            batch.push((i, Attributes::new(), attrs_int));
+            batch.push((i, Attributes::new(), attrs_int, Attributes::new()));
         }
         
         tx.send(WriteCommand::BatchInsert(batch)).unwrap();
@@ -36,7 +36,7 @@ fn test_cold_data_scan_performance() {
     
     // 2. Cold Start & Scan
     // We recreate the DB and register the same partition
-    let mut db = CdDBDispatcher::new(Some(base_path.clone()));
+    let mut db = CdDBDispatcher::new_std(Some(base_path.to_string_lossy().to_string()));
     let _tx = db.register_partition("cold.bench".to_string());
     
     let route = db.get_route("cold.bench").unwrap();

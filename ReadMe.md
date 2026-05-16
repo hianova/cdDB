@@ -9,6 +9,7 @@
 - **Extreme Throughput**: Achieves **32,000,000+ QPS** on a 4-core configuration for memory-resident data.
 - **Dynamic Bloom Filter Scaling**: Automatically resizes and rebuilds the bloom filter from disk when saturation reaches 70%, preventing index misses.
 - **High-Performance WAL Batching**: Optimized Write-Ahead Log that groups multiple commands into a single disk I/O operation via **Group Commit**.
+- **NoStd Support**: Fully compatible with `#![no_std]` environments. Core logic is decoupled from `std` via a Platform Abstraction Layer, making it suitable for embedded systems.
 - **Tiered Storage 2.0**: Powered by **DualCache-FF (0.1.0)**, supporting automatic promotion of "cold" disk-resident data into "hot" in-memory columnar caches.
 - **IT Operations Optimized**: Dedicated interface for ingesting and querying system monitoring data and logs with scaled metrics support.
 
@@ -39,7 +40,7 @@ use cdDB::{CdDBDispatcher, WriteCommand, Query, Attributes};
 
 fn main() {
     // Initialize the dispatcher with a base path for persistence
-    let mut db = CdDBDispatcher::new(Some("data_dir".into()));
+    let mut db = CdDBDispatcher::new_std(Some("data_dir".into()));
     
     // Register a partition (Spawns a native worker thread)
     let tx = db.register_partition("users.active".to_string());

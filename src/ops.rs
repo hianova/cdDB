@@ -1,9 +1,10 @@
-use serde::{Deserialize, Serialize};
 use crate::commands::Attributes;
 use ahash::AHashMap;
+use alloc::string::{String, ToString};
+use alloc::format;
 
 /// IT Operations Log Levels
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum LogLevel {
     Info,
     Warn,
@@ -13,7 +14,7 @@ pub enum LogLevel {
 }
 
 /// A structured record for IT Operations (Monitoring, Logging, etc.)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ITOpsRecord {
     pub timestamp: u64,
     pub service: String,
@@ -57,6 +58,7 @@ impl ITOpsIngest for ITOpsRecord {
             entity_id,
             attributes,
             attributes_int,
+            attributes_blob: crate::commands::Attributes::new(),
         }
     }
 }

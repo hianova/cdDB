@@ -1,12 +1,12 @@
 use cdDB::{CdDBDispatcher, WriteCommand, Attributes, Query};
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput, black_box};
 use std::thread;
 
 fn capex_benchmark(c: &mut Criterion) {
     // CAPEX here likely stands for "Capital Expenditure" efficiency: 
     // performance gained per resource unit.
     
-    let mut db = CdDBDispatcher::new(None);
+    let mut db = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("bench.capex".to_string());
     
     let count = 50_000;
@@ -14,7 +14,7 @@ fn capex_benchmark(c: &mut Criterion) {
     for i in 0..count {
         let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), i as u32);
-        batch.push((i, Attributes::new(), attrs_int));
+        batch.push((i, Attributes::new(), attrs_int, Attributes::new()));
     }
     tx.send(WriteCommand::BatchInsert(batch)).unwrap();
     
@@ -31,7 +31,8 @@ fn capex_benchmark(c: &mut Criterion) {
     
     group.bench_function("u32 Scan Efficiency", |b| {
         b.iter(|| {
-            let _ = query_engine.sum_int_range("val", 0, count);
+            let result = query_engine.sum_int_range(black_box("val"), black_box(0), black_box(count));
+            black_box(result);
         });
     });
 

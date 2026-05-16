@@ -1,6 +1,13 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 use crate::unsafe_core::GarbageEntry;
+// For no_std, we use a custom Mutex if std is not available.
+// For now, we'll keep using spin::Mutex if not std.
+#[cfg(feature = "std")]
+use std::sync::Mutex;
+#[cfg(not(feature = "std"))]
+use spin::Mutex;
 
 /// 全域邏輯時鐘
 pub static GLOBAL_EPOCH: AtomicUsize = AtomicUsize::new(1);
@@ -63,8 +70,12 @@ impl QsbrManager {
         // 2. 獲取所有活躍 Worker 的最小 Epoch
         let mut min_active = usize::MAX;
         {
-            let workers = self.workers.lock().unwrap();
-            for worker in workers.iter() {
+            #[cfg(feature = "std")]
+            let workers_guard = self.workers.lock().unwrap();
+            #[cfg(not(feature = "std"))]
+            let workers_guard = self.workers.lock();
+            
+            for worker in workers_guard.iter() {
                 let e = worker.local_epoch.load(Ordering::Acquire);
                 if e != 0 && e < min_active {
                     min_active = e;

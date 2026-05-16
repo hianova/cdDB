@@ -1,6 +1,8 @@
 use ahash::AHashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::string::String;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use crate::unsafe_core::{load_clone, load_ref, new_atomic_ptr};
 use crate::qsbr::WorkerState;
 
@@ -9,6 +11,17 @@ use crate::qsbr::WorkerState;
 pub struct Columns {
     pub str_cols: AHashMap<String, Arc<ColumnArray<String>>>,
     pub int_cols: AHashMap<String, Arc<ColumnArray<u32>>>,
+    pub blob_cols: AHashMap<String, Arc<ColumnArray<Vec<u8>>>>,
+}
+
+impl Columns {
+    pub fn new() -> Self {
+        Self {
+            str_cols: AHashMap::new(),
+            int_cols: AHashMap::new(),
+            blob_cols: AHashMap::new(),
+        }
+    }
 }
 
 /// 1. 最底層的連續資料陣列 (Column / DOD 結構)
@@ -47,9 +60,20 @@ impl<T> ColumnArray<T> {
     {
         worker.enter();
         let data = load_ref(&self.data);
-        let val = data.get(idx).and_then(|v| v.clone());
+        let val = data.get(idx).and_then(|v| v.as_ref().cloned());
         worker.leave();
         val
+    }
+
+    pub fn with_element<F, R>(&self, idx: usize, worker: &WorkerState, f: F) -> Option<R>
+    where
+        F: FnOnce(&T) -> R,
+    {
+        worker.enter();
+        let data = load_ref(&self.data);
+        let res = data.get(idx).and_then(|v| v.as_ref().map(f));
+        worker.leave();
+        res
     }
 
     pub fn get_data_snapshot(&self, worker: &WorkerState) -> Vec<Option<T>>

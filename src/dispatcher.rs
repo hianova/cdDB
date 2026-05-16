@@ -1,9 +1,16 @@
 use ahash::AHashMap;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicPtr;
-use std::path::PathBuf;
-use crossbeam_channel::{unbounded, Sender};
-use fastbloom::BloomFilter;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use alloc::string::{String, ToString};
+use alloc::format;
+use core::sync::atomic::AtomicPtr;
+
+#[cfg(feature = "std")]
+use std::sync::{Mutex, mpsc::{channel, Sender}};
+#[cfg(not(feature = "std"))]
+use spin::Mutex;
+
+use crate::bloom::SimpleBloom;
 use dualcache_ff::{Config, DualCacheFF};
 
 use crate::column::{Columns, ColumnArray};
@@ -12,96 +19,164 @@ use crate::partition::{MultiVectorPointer, Partition};
 use crate::qsbr::{QsbrManager, WorkerState};
 use crate::storage::Storage;
 use crate::unsafe_core::new_atomic_ptr;
+use crate::platform::{FileSystem, ThreadManager};
 
 /// 4. cdDB 全域入口與調度器 (Dispatcher)
 pub struct CdDBDispatcher {
     pub route_table: AHashMap<String, PartitionRoute>,
-    pub base_path: Option<PathBuf>,
+    pub base_path: Option<String>,
     pub workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
+    pub fs: Arc<dyn FileSystem>,
+    pub thread_manager: Arc<dyn ThreadManager>,
 }
 
 impl CdDBDispatcher {
-    pub fn new(base_path: Option<PathBuf>) -> Self {
+    pub fn new(
+        base_path: Option<String>,
+        fs: Arc<dyn FileSystem>,
+        thread_manager: Arc<dyn ThreadManager>,
+    ) -> Self {
         Self {
             route_table: AHashMap::new(),
             base_path,
             workers: Arc::new(Mutex::new(Vec::new())),
+            fs,
+            thread_manager,
         }
     }
 
-    pub fn register_partition(&mut self, path: String) -> UserWriter {
-        self.register_partition_with_budget(path, 100 * 1024 * 1024)
+    #[cfg(feature = "std")]
+    pub fn new_std(base_path: Option<String>) -> Self {
+        Self::new(
+            base_path,
+            Arc::new(crate::platform::StdFileSystem),
+            Arc::new(crate::platform::StdThreadManager),
+        )
     }
 
+    #[cfg(feature = "std")]
+    pub fn register_partition(&mut self, path: String) -> UserWriter {
+        self.register_partition_with_wal(path, None)
+    }
+
+    #[cfg(feature = "std")]
     pub fn register_partition_with_budget(
         &mut self,
         path: String,
         _budget_bytes: usize,
     ) -> UserWriter {
-        let (tx, rx) = unbounded();
-        let cols = Arc::new(new_atomic_ptr(Columns {
-            str_cols: AHashMap::new(),
-            int_cols: AHashMap::new(),
-        }));
+        self.register_partition_with_wal(path, None)
+    }
 
-        let wal_path = self
-            .base_path
-            .as_ref()
-            .map(|base| base.join(format!("{}.wal", path.replace('.', "/"))));
-        let storage_path = self
-            .base_path
-            .as_ref()
-            .map(|base| base.join(format!("{}.data", path.replace('.', "/"))))
-            .unwrap_or_else(|| PathBuf::from("data").join(&path));
-
-
-        let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::new()));
-        let bloom_filter = Arc::new(Mutex::new(BloomFilter::with_num_bits(1024 * 1024).hashes(4)));
-        let storage = Arc::new(Storage::new(storage_path));
-        let hot_index = Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60)));
-
+    #[cfg(feature = "std")]
+    pub fn register_partition_with_wal(
+        &mut self,
+        path: String,
+        wal_path: Option<String>,
+    ) -> UserWriter {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer_tx_out = tx.clone();
+        
+        let (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers) = self.init_partition_state(&path, wal_path.clone());
+        
         let route = PartitionRoute {
-            writer_tx: tx.clone(),
-            columns: Arc::clone(&cols),
+            writer_tx: tx,
+            columns: Arc::clone(&columns),
             shared_pointers: Arc::clone(&shared_pointers),
             hot_index: Arc::clone(&hot_index),
             bloom_filter: Arc::clone(&bloom_filter),
-            storage: Arc::clone(&storage),
-            workers: Arc::clone(&self.workers),
+            storage: Arc::new(Storage::new(storage_path.clone(), self.fs.clone())),
+            workers: Arc::clone(&workers),
         };
-
+        
         self.route_table.insert(path.clone(), route);
 
-        let workers_rt = Arc::clone(&self.workers);
-        let cols_rt = Arc::clone(&cols);
-        let shared_pointers_rt = Arc::clone(&shared_pointers);
-        let storage_rt = Arc::clone(&storage);
-        let bloom_filter_rt = Arc::clone(&bloom_filter);
-        let hot_index_rt = Arc::clone(&hot_index);
+        self.spawn_partition_thread(
+            rx,
+            columns,
+            wal_path,
+            workers,
+            storage_path,
+            shared_pointers,
+            bloom_filter,
+        );
 
-        std::thread::spawn(move || {
-            let mut partition = Partition {
-                columns: cols_rt,
-                shared_pointers: shared_pointers_rt,
-                writer_rx: rx,
-                wal_file: None,
-                qsbr: QsbrManager::new(workers_rt),
-                storage: storage_rt,
-                hot_index: (*hot_index_rt).clone(),
-                bloom_filter: bloom_filter_rt,
-                bloom_count: 0,
-                bloom_bits: 1024 * 1024,
-            };
+        UserWriter(writer_tx_out)
+    }
 
-            if let Some(path) = wal_path {
-                if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
-                partition.wal_file = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok();
-                partition.replay_wal(&path);
+    #[cfg(not(feature = "std"))]
+    pub fn register_partition_no_std(
+        &mut self,
+        path: String,
+        writer_tx: Arc<dyn crate::platform::MessageSender>,
+        _writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
+    ) {
+        let (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers) = self.init_partition_state(&path, None);
+        
+        let route = PartitionRoute {
+            writer_tx,
+            columns: Arc::clone(&columns),
+            shared_pointers: Arc::clone(&shared_pointers),
+            hot_index: Arc::clone(&hot_index),
+            bloom_filter: Arc::clone(&bloom_filter),
+            storage: Arc::new(Storage::new(storage_path.clone(), self.fs.clone())),
+            workers: Arc::clone(&workers),
+        };
+        
+        self.route_table.insert(path, route);
+        
+        // In no_std, the user must manage the thread/loop for the Partition
+    }
+
+    fn init_partition_state(&self, path: &str, _wal_path: Option<String>) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<Mutex<SimpleBloom>>, Arc<AtomicPtr<Columns>>, Arc<DualCacheFF<usize, ()>>, Arc<Mutex<Vec<Arc<WorkerState>>>>) {
+        let storage_path = self
+            .base_path
+            .as_ref()
+            .map(|base| format!("{}/{}.data", base, path.replace('.', "/")))
+            .unwrap_or_else(|| format!("data/{}", path));
+
+        let _ = self.fs.create_dir_all(&storage_path);
+
+        let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::new()));
+        let bloom_filter = Arc::new(Mutex::new(SimpleBloom::new(1024 * 1024)));
+        let columns = Arc::new(new_atomic_ptr(Columns::new()));
+        let hot_index = Arc::new(DualCacheFF::new(dualcache_ff::Config::with_memory_budget(100, 60)));
+        let workers = Arc::new(Mutex::new(Vec::new()));
+        
+        (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers)
+    }
+
+    #[cfg(feature = "std")]
+    fn spawn_partition_thread(
+        &self,
+        rx: std::sync::mpsc::Receiver<PartitionCommand>,
+        columns: Arc<AtomicPtr<Columns>>,
+        wal_path: Option<String>,
+        workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
+        storage_path: String,
+        shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
+        bloom_filter: Arc<Mutex<SimpleBloom>>,
+    ) {
+        let fs_rt = self.fs.clone();
+        let wal_path_rt = wal_path.clone();
+        
+        self.thread_manager.spawn(alloc::boxed::Box::new(move || {
+            let mut partition = Partition::new(
+                alloc::boxed::Box::new(crate::platform::StdMessageQueue { rx: Mutex::new(rx) }),
+                columns,
+                wal_path_rt.clone(),
+                workers,
+                storage_path,
+                fs_rt,
+                shared_pointers,
+                bloom_filter,
+            );
+
+            if let Some(ref path) = wal_path_rt {
+                partition.replay_wal(path);
             }
             partition.run();
-        });
-
-        UserWriter(tx)
+        }));
     }
 
     pub fn get_route(&self, path: &str) -> Option<&PartitionRoute> {
@@ -109,34 +184,47 @@ impl CdDBDispatcher {
     }
 }
 
+#[cfg(feature = "std")]
 impl Default for CdDBDispatcher {
     fn default() -> Self {
-        Self::new(None)
+        Self::new_std(None)
     }
 }
 
+#[cfg(feature = "std")]
 pub struct UserWriter(Sender<PartitionCommand>);
+#[cfg(feature = "std")]
 impl UserWriter {
-    pub fn send(&self, cmd: WriteCommand) -> Result<(), crossbeam_channel::SendError<PartitionCommand>> {
+    pub fn send(&self, cmd: WriteCommand) -> Result<(), std::sync::mpsc::SendError<PartitionCommand>> {
         self.0.send(PartitionCommand::Write(cmd))
     }
 }
 
 #[derive(Clone)]
 pub struct PartitionRoute {
+    #[cfg(feature = "std")]
     pub writer_tx: Sender<PartitionCommand>,
+    #[cfg(not(feature = "std"))]
+    pub writer_tx: Arc<dyn crate::platform::MessageSender>,
     pub columns: Arc<AtomicPtr<Columns>>,
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
     pub hot_index: Arc<DualCacheFF<usize, ()>>,
-    pub bloom_filter: Arc<Mutex<BloomFilter>>,
+    pub bloom_filter: Arc<Mutex<SimpleBloom>>,
     pub storage: Arc<Storage>,
     pub workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
 }
 
 impl PartitionRoute {
+    pub fn get_snapshot(&self) -> AHashMap<usize, MultiVectorPointer> {
+        crate::unsafe_core::load_clone(&self.shared_pointers)
+    }
+
     pub fn register_worker(&self) -> Arc<WorkerState> {
         let worker = Arc::new(WorkerState::new());
+        #[cfg(feature = "std")]
         let mut workers = self.workers.lock().unwrap();
+        #[cfg(not(feature = "std"))]
+        let mut workers = self.workers.lock();
         workers.push(Arc::clone(&worker));
         worker
     }
@@ -161,6 +249,18 @@ impl PartitionRoute {
         worker.enter();
         let cols = crate::unsafe_core::load_ref(&self.columns);
         let col = cols.int_cols.get(name).cloned();
+        worker.leave();
+        col
+    }
+
+    pub fn get_column_blob(
+        &self,
+        name: &str,
+        worker: &WorkerState,
+    ) -> Option<Arc<ColumnArray<Vec<u8>>>> {
+        worker.enter();
+        let cols = crate::unsafe_core::load_ref(&self.columns);
+        let col = cols.blob_cols.get(name).cloned();
         worker.leave();
         col
     }

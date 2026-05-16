@@ -6,7 +6,7 @@ fn main() {
     println!("=== cdDB IT Operations Interface Demo ===");
     
     // Initialize dispatcher
-    let mut db = CdDBDispatcher::new(Some("ops_data".into()));
+    let mut db = CdDBDispatcher::new_std(Some("ops_data".into()));
 
     // 1. Register a partition for system metrics
     let ops_tx = db.register_partition("system.metrics".to_string());
@@ -32,6 +32,7 @@ fn main() {
         entity_id: 1001,
         attributes: attrs,
         attributes_int: attrs_int,
+        attributes_blob: cdDB::Attributes::new(),
     }).unwrap();
 
     // Wait for async processing

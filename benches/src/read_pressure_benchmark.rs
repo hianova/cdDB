@@ -10,7 +10,7 @@ fn test_read_pressure_benchmark() {
     
     // 1. Preload entities
     let count = 10_000; 
-    let mut db = CdDBDispatcher::new(None);
+    let mut db = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("bench.pressure".to_string());
     
     let mut batch = Vec::with_capacity(count);
@@ -18,7 +18,7 @@ fn test_read_pressure_benchmark() {
         let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), i as u32);
         attrs_int.insert("link".to_string(), (i + 1) as u32); // Simple link to next entity
-        batch.push((i, Attributes::new(), attrs_int));
+        batch.push((i, Attributes::new(), attrs_int, Attributes::new()));
     }
     
     let start_load = Instant::now();
@@ -35,8 +35,8 @@ fn test_read_pressure_benchmark() {
     thread::sleep(Duration::from_secs(1));
     
     // 3. Multi-threaded Read Bombing
-    let num_threads = 8;
-    let ops_per_thread = 50_000;
+    let num_threads = 4;
+    let ops_per_thread = 250_000;
     let mut handles = vec![];
     
     let start_bench = Instant::now();
@@ -49,23 +49,21 @@ fn test_read_pressure_benchmark() {
             for _ in 0..ops_per_thread {
                 let entity_id = rand::thread_rng().gen_range(0..count - 100);
                 
-                // Construct a mixed query
-                let query = CdDbQuery {
-                    nodes: vec![
-                        QueryNode::Get { entity_id, attr: "val".to_string() },
-                        QueryNode::Link { 
-                            from_entity_id: entity_id, 
-                            link_attr: "link".to_string(), 
-                            target_attr: "val".to_string() 
-                        },
-                    ],
-                };
+                // Construct a mixed query (Stack-allocated array, zero-allocation)
+                let nodes = [
+                    QueryNode::Get { entity_id, attr: "val" },
+                    QueryNode::Link { 
+                        from_entity_id: entity_id, 
+                        link_attr: "link", 
+                        target_attr: "val" 
+                    },
+                ];
                 
                 let start_op = Instant::now();
-                let results = query_engine.execute(query);
+                query_engine.execute_with_cb(&nodes, |res| {
+                    black_box(res);
+                });
                 let duration = start_op.elapsed();
-                
-                black_box(results);
                 latencies.push(duration.as_nanos() as u64);
             }
             latencies

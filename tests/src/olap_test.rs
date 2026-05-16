@@ -8,7 +8,7 @@ use std::thread;
 fn test_olap_vectorized_queries() {
     println!("\n=== cdDB OLAP Vectorized Queries Test ===");
 
-    let mut db = CdDBDispatcher::new(None);
+    let mut db = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("olap.test".to_string());
 
     // 1. Insert some data
@@ -18,7 +18,7 @@ fn test_olap_vectorized_queries() {
         let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), i as u32);
         attrs_int.insert("even".to_string(), (i % 2 == 0) as u32);
-        batch.push((i, Attributes::new(), attrs_int));
+        batch.push((i, Attributes::new(), attrs_int, Attributes::new()));
     }
     tx.send(WriteCommand::BatchInsert(batch)).unwrap();
 
@@ -36,7 +36,7 @@ fn test_olap_vectorized_queries() {
     println!("Testing Scan...");
     let scan_query = CdDbQuery {
         nodes: vec![QueryNode::Scan {
-            attr: "val".to_string(),
+            attr: "val",
         }],
     };
     let results = query_engine.execute(scan_query);
@@ -53,7 +53,7 @@ fn test_olap_vectorized_queries() {
     println!("Testing Aggregate Sum...");
     let sum_query = CdDbQuery {
         nodes: vec![QueryNode::Aggregate {
-            attr: "val".to_string(),
+            attr: "val",
             op: AggregateOp::Sum,
         }],
     };
@@ -70,7 +70,7 @@ fn test_olap_vectorized_queries() {
     println!("Testing Aggregate Avg...");
     let avg_query = CdDbQuery {
         nodes: vec![QueryNode::Aggregate {
-            attr: "val".to_string(),
+            attr: "val",
             op: AggregateOp::Avg,
         }],
     };
@@ -88,15 +88,15 @@ fn test_olap_vectorized_queries() {
     let mix_query = CdDbQuery {
         nodes: vec![
             QueryNode::Aggregate {
-                attr: "val".to_string(),
+                attr: "val",
                 op: AggregateOp::Min,
             },
             QueryNode::Aggregate {
-                attr: "val".to_string(),
+                attr: "val",
                 op: AggregateOp::Max,
             },
             QueryNode::Aggregate {
-                attr: "val".to_string(),
+                attr: "val",
                 op: AggregateOp::Count,
             },
         ],

@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, Ordering};
+use alloc::boxed::Box;
 
 /// Safely load a reference from an AtomicPtr.
 /// Rationale: In cdDB, this is safe if called within a QSBR enter/leave block
