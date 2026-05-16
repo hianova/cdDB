@@ -1,22 +1,22 @@
 use ahash::AHashMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::format;
 use core::sync::atomic::AtomicPtr;
 
 #[cfg(feature = "std")]
-use std::sync::{Mutex, mpsc::{channel, Sender}};
+use std::sync::{Mutex, mpsc::Sender};
 #[cfg(not(feature = "std"))]
 use spin::Mutex;
 
 use crate::bloom::SimpleBloom;
-use dualcache_ff::{Config, DualCacheFF};
+use dualcache_ff::DualCacheFF;
 
 use crate::column::{Columns, ColumnArray};
 use crate::commands::{PartitionCommand, WriteCommand};
 use crate::partition::{MultiVectorPointer, Partition};
-use crate::qsbr::{QsbrManager, WorkerState};
+use crate::qsbr::WorkerState;
 use crate::storage::Storage;
 use crate::unsafe_core::new_atomic_ptr;
 use crate::platform::{FileSystem, ThreadManager};

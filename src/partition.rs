@@ -1,8 +1,8 @@
 use ahash::AHashMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::{String, ToString};
 use alloc::vec;
+use alloc::string::{String, ToString};
 use core::sync::atomic::AtomicPtr;
 use crate::platform::FileSystem;
 
@@ -11,9 +11,6 @@ use std::sync::Mutex;
 #[cfg(not(feature = "std"))]
 use spin::Mutex;
 
-#[cfg(feature = "std")]
-use std::sync::mpsc::Receiver;
-
 use dualcache_ff::DualCacheFF;
 use crate::bloom::SimpleBloom;
 
@@ -21,7 +18,7 @@ use crate::column::Columns;
 use crate::commands::{Attributes, PartitionCommand, WriteCommand};
 use crate::qsbr::{QsbrManager, WorkerState};
 use crate::storage::{Storage, EntityData};
-use crate::unsafe_core::{load_clone, new_atomic_ptr, swap_ptr};
+use crate::unsafe_core::{load_clone, swap_ptr};
 
 /// 2. 多向量指針快照 (RCU Snapshot)
 #[derive(Clone, Debug, Default)]
@@ -96,7 +93,7 @@ impl Partition {
     fn rebuild_bloom_filter(&mut self) {
         #[cfg(feature = "std")]
         {
-            let old_bits = self.bloom_bits;
+            let _old_bits = self.bloom_bits;
             self.bloom_bits *= 2;
             let mut new_bloom = SimpleBloom::new(self.bloom_bits);
             let mut count = 0;
@@ -285,6 +282,7 @@ impl Partition {
         self.apply_batch_commands(vec![cmd]);
     }
 
+    #[allow(dead_code)]
     fn log_wal(&mut self, cmd: &WriteCommand) {
         if let Some(path) = &self.wal_path {
             let bytes = cmd.encode();

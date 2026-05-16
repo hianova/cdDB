@@ -1,11 +1,6 @@
 use ahash::AHashMap;
-use alloc::vec::Vec;
 use alloc::string::{String, ToString};
-use alloc::vec;
-
-#[cfg(feature = "std")]
-use std::sync::mpsc::SyncSender;
-
+use alloc::vec::Vec;
 use crate::partition::MultiVectorPointer;
 
 /// cdDB 支援的資料類型
@@ -250,7 +245,7 @@ pub trait ResponseSender<T>: Send + Sync {
 #[cfg(feature = "std")]
 impl<T: Send + 'static> ResponseSender<T> for std::sync::mpsc::SyncSender<T> {
     fn send(&self, val: T) -> Result<(), String> {
-        self.send(val).map_err(|e: std::sync::mpsc::SendError<T>| e.to_string())
+        self.send(val).map_err(|e| e.to_string())
     }
 }
 

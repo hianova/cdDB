@@ -5,7 +5,7 @@ use crate::partition::MultiVectorPointer;
 use crate::dispatcher::PartitionRoute;
 use crate::qsbr::WorkerState;
 use crate::unsafe_core::load_ref;
-use crate::commands::{PartitionCommand, ResponseSender};
+use crate::commands::PartitionCommand;
 
 /// 4. 查詢接口 (Query Engine)
 /// 實踐 SPEC 中提到的「極速多重指標跳轉」

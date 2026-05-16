@@ -87,11 +87,13 @@ impl ThreadManager for StdThreadManager {
     }
 }
 
+#[allow(dead_code)]
 pub trait MessageSender: Send + Sync {
     fn send(&self, cmd: crate::commands::PartitionCommand) -> Result<(), String>;
 }
 
 #[cfg(feature = "std")]
+#[allow(dead_code)]
 pub struct StdMessageSender {
     pub tx: std::sync::mpsc::Sender<crate::commands::PartitionCommand>,
 }
