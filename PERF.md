@@ -1,13 +1,13 @@
 # cdDB Performance Audit Report
 
-## Version 0.2.0
+## Version 0.2.1
 
 ### 1. Test Environment
 
 | Item | Specification |
 |------|------|
 | **Hardware** | Mac (Apple Silicon) |
-| **Software** | Rust 2024 Edition, cdDB v0.2.0 |
+| **Software** | Rust 2024 Edition, cdDB v0.2.1 |
 | **Optimization Level** | Release Profile (`-C opt-level=3`) |
 | **Concurrency Configuration** | 4 Reader Threads (Physical Cores) |
 | **Benchmark Framework** | Criterion.rs v0.5 & Thread-Spawning Stress Tests |
@@ -81,4 +81,4 @@
 | Version | Architectural Characteristics | Read QPS | Dependencies |
 |------|---------|---------|------|
 | **v0.1.0** | Basic architecture, tokio/serde/bincode | ~900k | Heavy dependencies |
-| **v0.2.0** | Wait-Free RCU + Zero-Allocation + NoStd + Wait-Free Heat Tracker | **8.38M (1T) / 15.58M (4T)** | ahash + dualcache-ff |
+| **v0.2.1** | Wait-Free RCU + Zero-Allocation + NoStd + Wait-Free Heat Tracker | **8.38M (1T) / 15.58M (4T)** | ahash + dualcache-ff |
