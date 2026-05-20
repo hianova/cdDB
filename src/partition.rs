@@ -19,6 +19,7 @@ use crate::commands::{Attributes, PartitionCommand, WriteCommand};
 use crate::qsbr::{QsbrManager, WorkerState};
 use crate::storage::{Storage, EntityData};
 use crate::unsafe_core::{load_clone, swap_ptr};
+use crate::wal::WalProvider;
 
 /// 2. 多向量指針快照 (RCU Snapshot)
 #[derive(Clone, Debug, Default)]
@@ -40,7 +41,7 @@ pub struct Partition {
     pub bloom_filter: Arc<Mutex<SimpleBloom>>,
 
     // WAL 支援
-    pub wal_path: Option<String>,
+    pub wal: Arc<dyn WalProvider>,
     pub bloom_count: usize,
     pub bloom_bits: usize,
     pub fs: Arc<dyn FileSystem>,
@@ -50,7 +51,7 @@ impl Partition {
     pub fn new(
         writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
         columns: Arc<AtomicPtr<Columns>>,
-        wal_path: Option<String>,
+        wal: Arc<dyn WalProvider>,
         workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
         storage_path: String,
         fs: Arc<dyn FileSystem>,
@@ -64,7 +65,7 @@ impl Partition {
             columns,
             shared_pointers,
             writer_rx,
-            wal_path,
+            wal,
             qsbr: QsbrManager::new(workers),
             storage,
             hot_index: DualCacheFF::new(dualcache_ff::Config::with_memory_budget(100, 60)),
@@ -138,19 +139,14 @@ impl Partition {
                 }
             }
 
-            if let Some(ref path) = self.wal_path {
-                let mut batch_bytes = Vec::new();
-                for cmd in &commands {
-                    if let PartitionCommand::Write(wcmd) = cmd {
-                        let bytes = wcmd.encode();
-                        let len = bytes.len() as u32;
-                        batch_bytes.extend_from_slice(&len.to_le_bytes());
-                        batch_bytes.extend_from_slice(&bytes);
-                    }
+            let mut batch_refs = Vec::new();
+            for cmd in &commands {
+                if let PartitionCommand::Write(wcmd) = cmd {
+                    batch_refs.push(wcmd);
                 }
-                if !batch_bytes.is_empty() {
-                    let _ = self.fs.append(path, &batch_bytes);
-                }
+            }
+            if !batch_refs.is_empty() {
+                let _ = self.wal.append_batch(&batch_refs);
             }
 
             self.apply_batch_commands(commands);
@@ -179,6 +175,9 @@ impl Partition {
                 },
                 PartitionCommand::InternalLoad { entity_id, response_tx } => {
                     if let Some(ptr) = next_pointers.get(&entity_id) {
+                        // Ensure it's committed to shared_pointers before waking the reader
+                        let old = swap_ptr(&self.shared_pointers, next_pointers.clone());
+                        self.qsbr.defer_free(old);
                         let _ = response_tx.send(Some(ptr.clone()));
                         continue;
                     }
@@ -188,6 +187,11 @@ impl Partition {
                         let ptr = self.process_promote(&mut next_pointers, data);
                         if ptr.entity_id == entity_id { target = Some(ptr); }
                     }
+                    
+                    // Commit the promoted pointers to shared_pointers immediately
+                    let old = swap_ptr(&self.shared_pointers, next_pointers.clone());
+                    self.qsbr.defer_free(old);
+                    
                     let _ = response_tx.send(target);
                 }
             }
@@ -284,18 +288,11 @@ impl Partition {
 
     #[allow(dead_code)]
     fn log_wal(&mut self, cmd: &WriteCommand) {
-        if let Some(path) = &self.wal_path {
-            let bytes = cmd.encode();
-            let mut batch = Vec::new();
-            let len = bytes.len() as u32;
-            batch.extend_from_slice(&len.to_le_bytes());
-            batch.extend_from_slice(&bytes);
-            let _ = self.fs.append(path, &batch);
-        }
+        let _ = self.wal.append(cmd);
     }
 
-    pub fn replay_wal(&mut self, path: &String) {
-        if let Ok(bytes) = self.fs.read(path) {
+    pub fn replay_wal(&mut self) {
+        if let Ok(bytes) = self.wal.read_all() {
             let mut pos = 0;
             while pos + 4 <= bytes.len() {
                 let len = u32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap()) as usize;

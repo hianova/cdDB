@@ -236,7 +236,7 @@ impl<'a> QuerySession<'a> {
         // 1. Memory Index Check (Wait-Free RCU) - Primary Hot Path
         let snap = load_ref(&self.route.shared_pointers);
         if let Some(p) = snap.get(&entity_id) {
-            self.route.hot_index.insert(entity_id, ()); // Track hit
+            let _ = self.route.hot_index.get(&entity_id); // Track hit
             return Some(p);
         }
 

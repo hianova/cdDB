@@ -20,6 +20,7 @@ use crate::qsbr::WorkerState;
 use crate::storage::Storage;
 use crate::unsafe_core::new_atomic_ptr;
 use crate::platform::{FileSystem, ThreadManager};
+use crate::wal::{WalProvider, StdWal, NoopWal};
 
 /// 4. cdDB 全域入口與調度器 (Dispatcher)
 pub struct CdDBDispatcher {
@@ -74,10 +75,24 @@ impl CdDBDispatcher {
         path: String,
         wal_path: Option<String>,
     ) -> UserWriter {
+        let wal: Arc<dyn WalProvider> = if let Some(p) = wal_path {
+            Arc::new(StdWal::new(p, self.fs.clone()))
+        } else {
+            Arc::new(NoopWal)
+        };
+        self.register_partition_with_wal_provider(path, wal)
+    }
+
+    #[cfg(feature = "std")]
+    pub fn register_partition_with_wal_provider(
+        &mut self,
+        path: String,
+        wal: Arc<dyn WalProvider>,
+    ) -> UserWriter {
         let (tx, rx) = std::sync::mpsc::channel();
         let writer_tx_out = tx.clone();
         
-        let (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers) = self.init_partition_state(&path, wal_path.clone());
+        let (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers) = self.init_partition_state(&path);
         
         let route = PartitionRoute {
             writer_tx: tx,
@@ -87,20 +102,21 @@ impl CdDBDispatcher {
             bloom_filter: Arc::clone(&bloom_filter),
             storage: Arc::new(Storage::new(storage_path.clone(), self.fs.clone())),
             workers: Arc::clone(&workers),
+            wal: Arc::clone(&wal),
         };
         
         self.route_table.insert(path.clone(), route);
-
+ 
         self.spawn_partition_thread(
             rx,
             columns,
-            wal_path,
+            wal,
             workers,
             storage_path,
             shared_pointers,
             bloom_filter,
         );
-
+ 
         UserWriter(writer_tx_out)
     }
 
@@ -111,7 +127,7 @@ impl CdDBDispatcher {
         writer_tx: Arc<dyn crate::platform::MessageSender>,
         _writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
     ) {
-        let (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers) = self.init_partition_state(&path, None);
+        let (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers) = self.init_partition_state(&path);
         
         let route = PartitionRoute {
             writer_tx,
@@ -121,6 +137,7 @@ impl CdDBDispatcher {
             bloom_filter: Arc::clone(&bloom_filter),
             storage: Arc::new(Storage::new(storage_path.clone(), self.fs.clone())),
             workers: Arc::clone(&workers),
+            wal: Arc::new(NoopWal),
         };
         
         self.route_table.insert(path, route);
@@ -128,7 +145,7 @@ impl CdDBDispatcher {
         // In no_std, the user must manage the thread/loop for the Partition
     }
 
-    fn init_partition_state(&self, path: &str, _wal_path: Option<String>) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<Mutex<SimpleBloom>>, Arc<AtomicPtr<Columns>>, Arc<DualCacheFF<usize, ()>>, Arc<Mutex<Vec<Arc<WorkerState>>>>) {
+    fn init_partition_state(&self, path: &str) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<Mutex<SimpleBloom>>, Arc<AtomicPtr<Columns>>, Arc<DualCacheFF<usize, ()>>, Arc<Mutex<Vec<Arc<WorkerState>>>>) {
         let storage_path = self
             .base_path
             .as_ref()
@@ -151,20 +168,20 @@ impl CdDBDispatcher {
         &self,
         rx: std::sync::mpsc::Receiver<PartitionCommand>,
         columns: Arc<AtomicPtr<Columns>>,
-        wal_path: Option<String>,
+        wal: Arc<dyn WalProvider>,
         workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
         storage_path: String,
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
         bloom_filter: Arc<Mutex<SimpleBloom>>,
     ) {
         let fs_rt = self.fs.clone();
-        let wal_path_rt = wal_path.clone();
+        let wal_rt = wal.clone();
         
         self.thread_manager.spawn(alloc::boxed::Box::new(move || {
             let mut partition = Partition::new(
                 alloc::boxed::Box::new(crate::platform::StdMessageQueue { rx: Mutex::new(rx) }),
                 columns,
-                wal_path_rt.clone(),
+                wal_rt.clone(),
                 workers,
                 storage_path,
                 fs_rt,
@@ -172,9 +189,7 @@ impl CdDBDispatcher {
                 bloom_filter,
             );
 
-            if let Some(ref path) = wal_path_rt {
-                partition.replay_wal(path);
-            }
+            partition.replay_wal();
             partition.run();
         }));
     }
@@ -212,6 +227,7 @@ pub struct PartitionRoute {
     pub bloom_filter: Arc<Mutex<SimpleBloom>>,
     pub storage: Arc<Storage>,
     pub workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
+    pub wal: Arc<dyn WalProvider>,
 }
 
 impl PartitionRoute {

@@ -1,4 +1,4 @@
-use cdDB::{CdDBDispatcher, WriteCommand, Attributes, Query, CdDbQuery, QueryNode};
+use cdDB::{CdDBDispatcher, WriteCommand, Attributes, Query, QueryNode};
 use std::time::{Instant, Duration};
 use rand::Rng;
 use std::hint::black_box;

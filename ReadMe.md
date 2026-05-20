@@ -79,7 +79,7 @@ cargo bench -p cdDB-benches
 - **Cold Data Promotion**: ~330x speedup after memory promotion.
 - **Columnar Advantage**: ~8.9x faster than traditional struct scans.
 
-For detailed metrics, see [perf_report.md](perf_report.md).
+For detailed metrics, see [PERF.md](PERF.md).
 
 ## 📜 License
 

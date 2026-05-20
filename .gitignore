@@ -7,3 +7,4 @@ benches/data
 analisis.md
 benches/test_cold_data/
 tests/data/
+.DS_Store

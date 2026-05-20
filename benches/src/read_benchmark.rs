@@ -5,7 +5,7 @@ use ahash::AHashMap;
 
 #[derive(Clone)]
 struct TraditionalStruct {
-    id: usize,
+    _id: usize,
     val: u32,
 }
 
@@ -29,7 +29,7 @@ fn test_read_performance_benchmark() {
         attrs_int.insert("val".to_string(), i as u32);
         batch.push((i, Attributes::new(), attrs_int, Attributes::new()));
 
-        let s = TraditionalStruct { id: i, val: i as u32 };
+        let s = TraditionalStruct { _id: i, val: i as u32 };
         hash_map.insert(i, s.clone());
         vec_struct.push(s);
     }
