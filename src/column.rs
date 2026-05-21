@@ -65,6 +65,15 @@ impl<T> ColumnArray<T> {
         val
     }
 
+    #[inline(always)]
+    pub fn get_element_pinned(&self, idx: usize) -> Option<T>
+    where
+        T: Clone,
+    {
+        let data = load_ref(&self.data);
+        data.get(idx).and_then(|v| v.as_ref().cloned())
+    }
+
     pub fn with_element<F, R>(&self, idx: usize, worker: &WorkerState, f: F) -> Option<R>
     where
         F: FnOnce(&T) -> R,
@@ -74,6 +83,15 @@ impl<T> ColumnArray<T> {
         let res = data.get(idx).and_then(|v| v.as_ref().map(f));
         worker.leave();
         res
+    }
+
+    #[inline(always)]
+    pub fn with_element_pinned<F, R>(&self, idx: usize, f: F) -> Option<R>
+    where
+        F: FnOnce(&T) -> R,
+    {
+        let data = load_ref(&self.data);
+        data.get(idx).and_then(|v| v.as_ref().map(f))
     }
 
     pub fn get_data_snapshot(&self, worker: &WorkerState) -> Vec<Option<T>>
@@ -111,6 +129,15 @@ impl<T> ColumnArray<T> {
         let res = f(data);
         worker.leave();
         res
+    }
+
+    #[inline(always)]
+    pub fn with_data_pinned<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&Vec<Option<T>>) -> R,
+    {
+        let data = load_ref(&self.data);
+        f(data)
     }
 }
 

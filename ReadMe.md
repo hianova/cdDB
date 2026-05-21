@@ -5,9 +5,9 @@
 ## 🚀 Key Features
 
 - **Zero-Async Tax Architecture**: Optimized for performance by using native OS threads and synchronous I/O, eliminating the overhead of asynchronous runtime executors.
-- **Wait-Free Read Path**: Uses RCU (Read-Copy-Update) with **QSBR (Quiescent State Based Reclamation)** for safe, zero-lock memory management. Single-thread read latency as low as **~48.6 ns**.
+- **Wait-Free Read Path**: Uses RCU (Read-Copy-Update) with **QSBR (Quiescent State Based Reclamation)** for safe, zero-lock memory management. Single-thread read latency as low as **~38.3 ns**.
 - **Batch Query API**: `CdDBDispatcher::execute_batch` processes `N` queries under a **single QSBR pin** — the network/session layer passes a `&[QueryNode]` slice and never touches `WorkerState` or any QSBR primitive directly.
-- **Extreme Throughput**: Achieves **~15.6M QPS** on a 4-core configuration for memory-resident data (Criterion); **~9.25M QPS** single-thread.
+- **Extreme Throughput**: Achieves **~20.5M QPS** end-to-end lookup and **~1.73B QPS** raw columnar read under 4 reader threads (Criterion); **~9.73M QPS** single-thread.
 - **Dynamic Bloom Filter Scaling**: Automatically resizes and rebuilds the bloom filter from disk when saturation reaches 70%, preventing partition misses.
 - **High-Performance WAL Batching**: Optimized Write-Ahead Log that groups multiple commands into a single disk I/O operation via **Group Commit**.
 - **NoStd Support**: Fully compatible with `#![no_std]` environments. Core logic is decoupled from `std` via a Platform Abstraction Layer, making it suitable for embedded systems.
@@ -101,14 +101,14 @@ cargo test --release -p cdDB-benches --test read_pressure_benchmark -- --nocaptu
 |--------|-------|
 | **Single-Thread Read Latency** | ~38.3 ns (hot path, wait-free RCU) |
 | **Bloom Filter Miss Latency** | ~19.0 ns (disk I/O avoided) |
-| **Single-Thread Read Throughput** | ~9.47M QPS |
-| **4-Thread Read Throughput (Criterion)** | ~12.43M QPS |
-| **4-Thread Pressure Throughput (wall-clock)** | ~5.90M QPS (Get + Link composite ops) |
-| **4-Thread P50 Latency** | 500 ns |
-| **4-Thread P99 Latency** | 1.92 µs |
-| **4-Thread Tail Factor (P99/P50)** | 3.83x (proves wait-free stability) |
-| **Write Throughput** | ~5.42M items/s (1000-item batch insert) |
-| **Columnar Scan Advantage** | **238x faster** than `Vec<Struct>` (DOD benefit) |
+| **Single-Thread Read Throughput** | ~9.73M QPS |
+| **4-Thread Read Throughput (Criterion)** | ~20.55M QPS (Stress) / **~1.73B QPS** (Columnar DOD) |
+| **4-Thread Pressure Throughput (wall-clock)** | **~7.35M QPS** (Get + Link composite ops) |
+| **4-Thread P50 Latency** | **416 ns** |
+| **4-Thread P99 Latency** | **1.54 µs** |
+| **4-Thread Tail Factor (P99/P50)** | **3.71x** (proves wait-free stability) |
+| **Write Throughput** | **~5.86M items/s** (1000-item batch insert) |
+| **Columnar Scan Advantage** | **128x faster** than `Vec<Struct>` (DOD benefit) |
 | **Cold Data Promotion Speedup** | ~330x after promotion to columnar memory cache |
 
 For detailed metrics and historical evolution, see [PERF.md](PERF.md).

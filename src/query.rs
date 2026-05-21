@@ -164,7 +164,7 @@ impl<'a> QuerySession<'a> {
                     if let Some(ptr) = self.get_pointer(*entity_id) {
                         if let Some(&start_idx) = ptr.attribute_indices.get(*attr) {
                             if let Some(col) = self.route.get_column_int(attr, &self.worker) {
-                                let range_vals = col.with_data(&self.worker, |data| {
+                                let range_vals = col.with_data_pinned(|data| {
                                     data.iter()
                                         .skip(start_idx)
                                         .take(*len)
@@ -181,17 +181,17 @@ impl<'a> QuerySession<'a> {
                 }
                 QueryNode::Scan { attr } => {
                     if let Some(col) = self.route.get_column_int(attr, &self.worker) {
-                        let vals = col.with_data(&self.worker, |data| {
+                        let vals = col.with_data_pinned(|data| {
                             data.iter().flatten().cloned().collect()
                         });
                         cb(QueryResult::IntList(vals));
                     } else if let Some(col) = self.route.get_column_str(attr, &self.worker) {
-                        let vals = col.with_data(&self.worker, |data| {
+                        let vals = col.with_data_pinned(|data| {
                             data.iter().flatten().cloned().collect()
                         });
                         cb(QueryResult::StrList(vals));
                     } else if let Some(col) = self.route.get_column_blob(attr, &self.worker) {
-                        let vals = col.with_data(&self.worker, |data| {
+                        let vals = col.with_data_pinned(|data| {
                             data.iter().flatten().cloned().collect()
                         });
                         cb(QueryResult::BlobList(vals));
@@ -201,7 +201,7 @@ impl<'a> QuerySession<'a> {
                 }
                 QueryNode::Aggregate { attr, op } => {
                     if let Some(col) = self.route.get_column_int(attr, &self.worker) {
-                        let res = col.with_data(&self.worker, |data| {
+                        let res = col.with_data_pinned(|data| {
                             let it = data.iter().flatten().map(|&v| v);
                             match op {
                                 AggregateOp::Sum => QueryResult::IntSum(it.map(|v| v as u64).sum()),
@@ -281,7 +281,7 @@ impl<'a> QuerySession<'a> {
                 return self
                     .route
                     .get_column_str(attr, &self.worker)
-                    .and_then(|col| col.get_element(idx, &self.worker));
+                    .and_then(|col| col.get_element_pinned(idx));
             }
         }
         None
@@ -293,7 +293,7 @@ impl<'a> QuerySession<'a> {
                 return self
                     .route
                     .get_column_int(attr, &self.worker)
-                    .and_then(|col| col.get_element(idx, &self.worker));
+                    .and_then(|col| col.get_element_pinned(idx));
             }
         }
         None
@@ -305,7 +305,7 @@ impl<'a> QuerySession<'a> {
                 return self
                     .route
                     .get_column_blob(attr, &self.worker)
-                    .and_then(|col| col.get_element(idx, &self.worker));
+                    .and_then(|col| col.get_element_pinned(idx));
             }
         }
         None
@@ -321,7 +321,7 @@ impl<'a> QuerySession<'a> {
                 return self
                     .route
                     .get_column_str(attr, &self.worker)
-                    .and_then(|col| col.with_element(idx, &self.worker, |s| f(s)));
+                    .and_then(|col| col.with_element_pinned(idx, |s| f(s)));
             }
         }
         None
@@ -337,7 +337,7 @@ impl<'a> QuerySession<'a> {
                 return self
                     .route
                     .get_column_blob(attr, &self.worker)
-                    .and_then(|col| col.with_element(idx, &self.worker, |b| f(b)));
+                    .and_then(|col| col.with_element_pinned(idx, |b| f(b)));
             }
         }
         None

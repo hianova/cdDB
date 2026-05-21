@@ -13,7 +13,7 @@
 | **Benchmark Framework** | Criterion.rs v0.5 & Thread-Spawning Stress Tests |
 | **Dead-Code Elimination** | All read results wrapped in `std::hint::black_box()` to prevent compiler removal |
 | **Memory Barriers** | Reader: `Ordering::Acquire`; Writer Swap: `Ordering::AcqRel` |
-| **Key Optimization** | Eliminated spurious QSBR double-enter in `get_column_*` / `len` — removed redundant `worker.enter()`/`leave()` inside every hot-path column access, replacing with a single session-level pin via `QuerySession` |
+| **Key Optimization** | Deep wait-free optimization purging all atomic epoch-writes from inner lookup paths. Introduced pinned element access methods (`get_element_pinned`, `with_element_pinned`, `with_data_pinned`) on `ColumnArray` to leverage session-level pinned RCU context. |
 
 ---
 
@@ -36,8 +36,9 @@
 
 | Benchmark Case | Median Time / Iter | Effective Throughput | Description |
 |----------------|--------------------|----------------------|-------------|
-| **Single Thread Get Int** | ~105.6 ns/op | **~9.47M QPS** | Single-core continuous random reads |
-| **Multi-Thread 4 Readers (Criterion)** | ~321.9 µs/iter | **~12.43M QPS** | 4-thread parallel reads |
+| **Single Thread Get Int** | ~102.76 ns/op | **~9.73M QPS** | Single-core continuous random reads |
+| **Multi-Thread (4 Readers) Stress** | ~194.64 ns/op | **~20.55M QPS** | 4-thread parallel database lookups |
+| **Multi-Thread (4 Readers) Columnar Read** | ~2.31 ns/op | **~1.73B QPS** | 4-thread sequential wait-free ColumnArray reads |
 
 ---
 
@@ -48,12 +49,12 @@
 | Metric | Value | Δ vs v0.2.1 |
 |--------|-------|-------------|
 | **Total Operations** | 1,000,000 | — |
-| **Total Duration** | 169.6 ms | −2.3% |
-| **Throughput** | **5,896,455 QPS** | **+2.4%** |
-| **Latency P50** | **500 ns** | +8.9% |
-| **Latency P99** | **1.92 µs** | +4.9% |
-| **Latency P99.9** | **3.04 µs** | +35.1% |
-| **Tail Factor (P99/P50)** | **3.83x** | Proves stable wait-free execution |
+| **Total Duration** | 135.99 ms | −19.8% |
+| **Throughput** | **7,353,339 QPS** | **+24.7%** |
+| **Latency P50** | **416 ns** | −16.8% |
+| **Latency P99** | **1.54 µs** | −19.8% |
+| **Latency P99.9** | **4.17 µs** | +37.1% |
+| **Tail Factor (P99/P50)** | **3.71x** | Proves stable wait-free execution |
 
 ---
 
@@ -69,28 +70,28 @@
 
 | Case | Time (10k items) | Ratio |
 |------|------------------|-------|
-| **cdDB Columnar Scan** | **4.58 µs** | **238x faster** |
-| `Vec<Struct>` Scan | 1.090 ms | baseline |
-| **cdDB Query API** (random lookup) | **75.51 ms** | **4.89x slower than HashMap** (due to sync/security/epoch/garbage collection checking) |
-| `HashMap` Random Lookup | 15.44 ms | baseline |
+| **cdDB Columnar Scan** | **4.25 µs** | **128x faster** |
+| `Vec<Struct>` Scan | 544.38 µs | baseline |
+| **cdDB Query API** (random lookup) | **68.16 ms** | **5.57x slower than HashMap** (due to sync/security/epoch/garbage collection checking) |
+| `HashMap` Random Lookup | 12.24 ms | baseline |
 
 ---
 
 #### 2.5 Write Throughput
 
-> Benchmark: `throughput` — Batch inserts (including WAL persistence + memory index update, Criterion, 35k iterations)
+> Benchmark: `throughput` — Batch inserts (including WAL persistence + memory index update, Criterion, 30k iterations)
 
 | Benchmark Case | Median Time / Iter | Effective Throughput | Δ vs v0.2.1 |
 |----------------|--------------------|----------------------|-------------|
-| **Batch Insert (1000 items)** | ~184.4 µs | **~5.42M items/s** | **+6.9%** |
+| **Batch Insert (1000 items)** | ~170.65 µs | **~5.86M items/s** | **+8.1%** |
 
 ---
 
 ### 3. Evolution & Milestones
 
-| Version | Key Change | 1-Thread QPS | 4-Thread QPS (Criterion) | 4-Thread P50 | Dependencies |
-|---------|------------|--------------|--------------------------|--------------|--------------|
-| **v0.1.0** | Basic architecture, tokio/serde/bincode | ~900k | — | — | Heavy |
-| **v0.2.0** | Wait-Free RCU + Zero-Allocation + NoStd + Wait-Free Heat Tracker | ~8.38M | ~15.58M | 542 ns | ahash + dualcache-ff |
-| **v0.2.1** | Eliminate QSBR double-enter in column getters + `execute_batch` API | ~9.25M | **~15.62M** | **459 ns** | ahash + dualcache-ff |
-| **v0.2.2** | Retest & bench with `dualcache-ff 0.2.2` upgrade, refresh metrics | **~9.47M** | **~12.43M** | **500 ns** | ahash + dualcache-ff |
+| Version | Key Change | 1-Thread QPS | 4-Thread QPS (Stress) | 4-Thread Columnar QPS | 4-Thread P50 | Dependencies |
+|---------|------------|--------------|-----------------------|-----------------------|--------------|--------------|
+| **v0.1.0** | Basic architecture, tokio/serde/bincode | ~900k | — | — | — | Heavy |
+| **v0.2.0** | Wait-Free RCU + Zero-Allocation + NoStd + Wait-Free Heat Tracker | ~8.38M | ~15.58M | — | 542 ns | ahash + dualcache-ff |
+| **v0.2.1** | Eliminate QSBR double-enter in column getters + `execute_batch` API | ~9.25M | ~15.62M | — | 459 ns | ahash + dualcache-ff |
+| **v0.2.2** | Retest & bench with `dualcache-ff 0.2.2` upgrade, refresh metrics. Purged spurious epoch-write overhead from columnar reads. | **~9.73M** | **~20.55M** | **~1.73B** | **416 ns** | ahash + dualcache-ff |

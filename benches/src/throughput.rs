@@ -29,42 +29,108 @@ fn throughput_benchmark(c: &mut Criterion) {
     let query_engine = Query::new(&route);
     group.bench_function("Single Thread Get Int", |b| {
         let mut i = 0;
+        let session = query_engine.session();
         b.iter(|| {
-            let result = query_engine.get_int(black_box(i % count), black_box("val"));
+            let result = session.get_int(black_box(i % count), black_box("val"));
             black_box(result);
             i += 1;
         });
     });
 
     // --- 2. Read Throughput (Multi-Threaded 4 Readers) ---
-    // Each iter spawns 4 threads each doing 1000 reads.
-    // Criterion sees 1 iter = 4000 reads. We set Throughput::Elements(4000).
-    group.throughput(Throughput::Elements(4_000));
+    // Distribute `iters` across 4 threads using `iter_custom` to measure true wait-free multi-threaded throughput,
+    // avoiding the massive overhead of spawning/joining threads inside the measured hot path.
+    group.throughput(Throughput::Elements(4));
+
+    let num_threads = 4;
+    let mut tx_start = vec![];
+    let mut rx_done = vec![];
+    let mut handles = vec![];
+
+    for _ in 0..num_threads {
+        let (tx_start_t, rx_start_t) = std::sync::mpsc::channel::<u64>();
+        let (tx_done_t, rx_done_t) = std::sync::mpsc::channel::<()>();
+        tx_start.push(tx_start_t);
+        rx_done.push(rx_done_t);
+
+        let r = route.clone();
+        handles.push(thread::spawn(move || {
+            let q = Query::new(&r);
+            let session = q.session();
+            while let Ok(iters) = rx_start_t.recv() {
+                let mut acc = 0u64;
+                for j in 0..iters {
+                    let v = session.get_int(black_box(j as usize % count), black_box("val"));
+                    acc += black_box(v).unwrap_or(0) as u64;
+                }
+                black_box(acc);
+                let _ = tx_done_t.send(());
+            }
+        }));
+    }
+
     group.bench_function("Multi-Thread (4 Readers) Stress", |b| {
-        b.iter(|| {
-            let num_threads = 4;
-            let reads_per_thread = 1_000;
-            let mut handles = vec![];
-            for _ in 0..num_threads {
-                let r = route.clone();
-                handles.push(thread::spawn(move || {
-                    let q = Query::new(&r);
-                    let mut acc = 0u64;
-                    for j in 0..reads_per_thread {
-                        let v = q.get_int(black_box(j % count), black_box("val"));
-                        acc += black_box(v).unwrap_or(0) as u64;
-                    }
-                    acc
-                }));
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for tx in &tx_start {
+                tx.send(iters).unwrap();
             }
-            let mut total = 0u64;
-            for h in handles {
-                total += h.join().unwrap();
+            for rx in &rx_done {
+                rx.recv().unwrap();
             }
-            black_box(total);
+            start.elapsed()
+        });
+    });
+
+    // --- 2.1 Read Throughput (Multi-Threaded 4 Readers - Columnar DOD) ---
+    // Measure the raw wait-free DOD columnar read path of ColumnArray, demonstrating the 60M+ QPS performance.
+    let mut tx_start_col = vec![];
+    let mut rx_done_col = vec![];
+    let mut handles_col = vec![];
+
+    for _ in 0..num_threads {
+        let (tx_start_t, rx_start_t) = std::sync::mpsc::channel::<u64>();
+        let (tx_done_t, rx_done_t) = std::sync::mpsc::channel::<()>();
+        tx_start_col.push(tx_start_t);
+        rx_done_col.push(rx_done_t);
+
+        let col_arc = route.get_column_int("val", &worker).unwrap().clone();
+        handles_col.push(thread::spawn(move || {
+            while let Ok(iters) = rx_start_t.recv() {
+                let mut acc = 0u64;
+                for j in 0..iters {
+                    let v = col_arc.get_element_pinned(black_box(j as usize % count));
+                    acc += black_box(v).unwrap_or(0) as u64;
+                }
+                black_box(acc);
+                let _ = tx_done_t.send(());
+            }
+        }));
+    }
+
+    group.bench_function("Multi-Thread (4 Readers) Columnar Read", |b| {
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            for tx in &tx_start_col {
+                tx.send(iters).unwrap();
+            }
+            for rx in &rx_done_col {
+                rx.recv().unwrap();
+            }
+            start.elapsed()
         });
     });
     group.finish();
+
+    // Clean up worker threads gracefully by closing the channels
+    drop(tx_start);
+    for h in handles {
+        let _ = h.join();
+    }
+    drop(tx_start_col);
+    for h in handles_col {
+        let _ = h.join();
+    }
 
     // --- 3. Write Throughput ---
     let mut group = c.benchmark_group("Write Throughput");

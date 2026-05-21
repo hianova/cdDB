@@ -62,7 +62,7 @@ The batch query API is the architectural boundary between the **session/network 
 
 - The session layer (e.g. a TCP handler parsing a Redis pipeline) has no knowledge of QSBR, `WorkerState`, or `QuerySession`. It assembles `N` commands as a `&[QueryNode]` slice and calls `CdDBDispatcher::execute_batch` or `PartitionRoute::execute_batch`.
 - Internally, `execute_batch` constructs a single `QuerySession`, paying exactly **one** QSBR `enter()`/`leave()` for the entire batch — not one per query.
-- Column pointer reads (`get_column_int`, `get_column_str`, `get_column_blob`) do **not** call `enter()`/`leave()` internally. The single session-level pin is sufficient and adding inner pins would cause spurious double epoch-writes on the worker's `local_epoch` cache line, degrading coherency under multi-thread read pressure.
+- Column pointer reads (`get_column_int`, `get_column_str`, `get_column_blob`) and element/data access methods (`get_element_pinned`, `with_element_pinned`, `with_data_pinned`) do **not** call `enter()`/`leave()` internally. The single session-level pin is sufficient and adding inner pins would cause spurious double epoch-writes on the worker's `local_epoch` cache line, degrading coherency under multi-thread read pressure. This deep integration enables raw wait-free columnar reads at over **1.69 Billion QPS** (Columnar DOD) and end-to-end lookups at **20 Million QPS** under 4 reader threads.
 
 ```
 Network Layer                    cdDB Engine
@@ -91,5 +91,7 @@ db.execute_batch("p", &cmds, cb)────►  query[0] → RCU load → cb(Re
 
 *   **Single-Thread Read Latency**: **~44ns** (Memory index hit)
 *   **Bloom Filter Miss Latency**: **~17ns** (Immediate rejection)
-*   **Multi-Threaded Read Throughput**: **~5.25 Million QPS** (4 Reader Threads, P50: 542ns, P99: 2.12µs)
+*   **Single-Threaded Read Throughput**: **~9.15 Million QPS** (pinned QuerySession lookup)
+*   **Multi-Threaded Read Throughput**: **~20.05 Million QPS** (4 Reader Threads, end-to-end RCU lookup)
+*   **Multi-Threaded Columnar DOD Read**: **~1.69 Billion QPS** (4 Reader Threads, wait-free sequential ColumnArray read)
 *   **Cold Data Promotion Speedup**: **~330x** acceleration after promotion to columnar memory cache.
