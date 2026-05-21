@@ -56,6 +56,28 @@ pub struct ColumnArray<T> {
 2.  **Memory Index Check**: Looks up the entity in the wait-free RCU map. If hit, registers a wait-free cache-hit track with `DualCacheFF::get` and returns immediately (~44ns).
 3.  **Disk Load & Promotion**: If not present in memory, triggers synchronous disk load from block storage. The loaded data is evaluated by the `DualCache-FF` engine for promotion to the active in-memory columnar database.
 
+### 3.3 Batch Query Execution
+
+The batch query API is the architectural boundary between the **session/network layer** and the **database engine**:
+
+- The session layer (e.g. a TCP handler parsing a Redis pipeline) has no knowledge of QSBR, `WorkerState`, or `QuerySession`. It assembles `N` commands as a `&[QueryNode]` slice and calls `CdDBDispatcher::execute_batch` or `PartitionRoute::execute_batch`.
+- Internally, `execute_batch` constructs a single `QuerySession`, paying exactly **one** QSBR `enter()`/`leave()` for the entire batch — not one per query.
+- Column pointer reads (`get_column_int`, `get_column_str`, `get_column_blob`) do **not** call `enter()`/`leave()` internally. The single session-level pin is sufficient and adding inner pins would cause spurious double epoch-writes on the worker's `local_epoch` cache line, degrading coherency under multi-thread read pressure.
+
+```
+Network Layer                    cdDB Engine
+─────────────────────────────────────────────
+parse_pipeline() → [N Commands]
+                                 enter QSBR once
+db.execute_batch("p", &cmds, cb)────►  query[0] → RCU load → cb(Result)
+                                        query[1] → RCU load → cb(Result)
+                                        ...
+                                        query[N] → RCU load → cb(Result)
+                                 leave QSBR once
+```
+
+
+
 ---
 
 ## 4. Safety & Encapsulation

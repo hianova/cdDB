@@ -1,13 +1,45 @@
 //! # cdDB: High-Performance Synchronous Tiered Storage Engine
 //!
-//! `cdDB` is a high-performance tiered storage engine built in Rust, designed for extreme concurrency,
-//! ultra-low latency data access, and micro-latency analytics.
+//! `cdDB` is a high-performance tiered storage engine built in Rust, designed for extreme
+//! concurrency, ultra-low latency data access, and micro-latency analytics.
 //!
 //! ## Key Architectural Features
-//! - **Zero-Async Tax**: Utilizes synchronous, native OS threads and blocking I/O to avoid asynchronous runtime scheduler overhead.
-//! - **Wait-Free Read Path**: Employs Read-Copy-Update (RCU) with Quiescent State Based Reclamation (QSBR) for thread-safe lock-free reads.
-//! - **NoStd Support**: Decoupled from `std` by default, making it fully compatible with embedded systems and custom kernels.
-//! - **Tiered Storage 2.0**: Powered by `DualCache-FF` for O(1) heat tracking and automatic promotion of cold data to memory.
+//!
+//! - **Zero-Async Tax**: Utilizes synchronous, native OS threads and blocking I/O to avoid
+//!   asynchronous runtime scheduler overhead.
+//! - **Wait-Free Read Path**: Employs Read-Copy-Update (RCU) with Quiescent State Based
+//!   Reclamation (QSBR) for thread-safe, lock-free reads. A single QSBR pin covers an entire
+//!   `QuerySession`, so processing 1,000 queries inside one session pays exactly **one**
+//!   enter/leave overhead — not 1,000.
+//! - **Batch Query API**: `CdDBDispatcher::execute_batch` and `PartitionRoute::execute_batch`
+//!   are the architectural boundary between the network/session layer and the database engine.
+//!   The caller passes an array of `QueryNode` commands; the engine processes them under a
+//!   single QSBR pin and delivers results via a callback. The caller never touches `WorkerState`,
+//!   `QuerySession`, or any QSBR primitive directly.
+//! - **NoStd Support**: Decoupled from `std` by default, making it fully compatible with
+//!   embedded systems and custom kernels via a Platform Abstraction Layer.
+//! - **Tiered Storage 2.0**: Powered by `DualCache-FF` for O(1) wait-free heat tracking and
+//!   automatic promotion of cold disk-resident data into hot in-memory columnar caches.
+//!
+//! ## Batch Query Example
+//!
+//! ```rust,ignore
+//! use cdDB::{CdDBDispatcher, WriteCommand, Attributes, QueryNode, QueryResult};
+//!
+//! let mut db = CdDBDispatcher::new_std(None);
+//! let _tx = db.register_partition("users".to_string());
+//!
+//! // The network layer: does NOT know about QSBR, WorkerState, or QuerySession.
+//! // It simply assembles a slice of commands and calls execute_batch.
+//! let nodes = [
+//!     QueryNode::Get { entity_id: 1, attr: "score" },
+//!     QueryNode::Get { entity_id: 2, attr: "score" },
+//! ];
+//! db.execute_batch("users", &nodes, |result| {
+//!     // process result — entire batch runs under one QSBR pin
+//!     println!("{:?}", result);
+//! });
+//! ```
 
 #![no_std]
 #![allow(non_snake_case)]

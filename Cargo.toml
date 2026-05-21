@@ -22,7 +22,7 @@ path = "examples/it_ops_demo.rs"
 spin = "0.9"
 
 ahash = "0.8"
-dualcache-ff = "0.2.1"
+dualcache-ff = "0.2.2"
 
 [workspace]
 members = [

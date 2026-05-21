@@ -3,6 +3,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
+use crate::query::{Query, QueryNode, QueryResult};
 use core::sync::atomic::AtomicPtr;
 
 #[cfg(feature = "std")]
@@ -197,6 +198,28 @@ impl CdDBDispatcher {
     pub fn get_route(&self, path: &str) -> Option<&PartitionRoute> {
         self.route_table.get(path)
     }
+
+    /// Execute a batch of query nodes against a named partition under a single
+    /// QSBR pin. The network / session layer does not need to know about QSBR,
+    /// `Query`, or `WorkerState` — simply pass the slice and a result callback.
+    ///
+    /// This is the architectural boundary described in the cdDB design spec:
+    /// the caller (e.g. a TCP stream handler parsing a Redis pipeline) hands
+    /// `N` commands as an array and pays exactly **one** QSBR enter/leave.
+    #[cfg(feature = "std")]
+    pub fn execute_batch<'b, F>(
+        &self,
+        partition: &str,
+        nodes: &[QueryNode<'b>],
+        mut cb: F,
+    ) where
+        F: FnMut(QueryResult),
+    {
+        if let Some(route) = self.route_table.get(partition) {
+            let q = Query::new(route);
+            q.execute_with_cb(nodes, &mut cb);
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -245,47 +268,65 @@ impl PartitionRoute {
         worker
     }
 
+    /// Look up a string column by name.
+    ///
+    /// **Caller contract**: this must be invoked while the calling thread is
+    /// already within a QSBR-pinned region (i.e. inside a `QuerySession`, or
+    /// after a manual `worker.enter()` call). The method itself does **not**
+    /// call `enter()`/`leave()` — doing so inside an already-pinned session
+    /// would cause spurious double epoch-writes on the worker's `local_epoch`
+    /// cache line, degrading coherency under multi-thread read pressure.
     pub fn get_column_str(
         &self,
         name: &str,
-        worker: &WorkerState,
+        _worker: &WorkerState,
     ) -> Option<Arc<ColumnArray<String>>> {
-        worker.enter();
         let cols = crate::unsafe_core::load_ref(&self.columns);
-        let col = cols.str_cols.get(name).cloned();
-        worker.leave();
-        col
+        cols.str_cols.get(name).cloned()
     }
 
+    /// Look up an integer column by name.
+    ///
+    /// See `get_column_str` for the caller QSBR contract.
     pub fn get_column_int(
         &self,
         name: &str,
-        worker: &WorkerState,
+        _worker: &WorkerState,
     ) -> Option<Arc<ColumnArray<u32>>> {
-        worker.enter();
         let cols = crate::unsafe_core::load_ref(&self.columns);
-        let col = cols.int_cols.get(name).cloned();
-        worker.leave();
-        col
+        cols.int_cols.get(name).cloned()
     }
 
+    /// Look up a blob column by name.
+    ///
+    /// See `get_column_str` for the caller QSBR contract.
     pub fn get_column_blob(
         &self,
         name: &str,
-        worker: &WorkerState,
+        _worker: &WorkerState,
     ) -> Option<Arc<ColumnArray<Vec<u8>>>> {
-        worker.enter();
         let cols = crate::unsafe_core::load_ref(&self.columns);
-        let col = cols.blob_cols.get(name).cloned();
-        worker.leave();
-        col
+        cols.blob_cols.get(name).cloned()
     }
 
-    pub fn len(&self, worker: &WorkerState) -> usize {
-        worker.enter();
+    /// Return the number of entities currently resident in memory.
+    ///
+    /// See `get_column_str` for the caller QSBR contract.
+    pub fn len(&self, _worker: &WorkerState) -> usize {
         let snap = crate::unsafe_core::load_ref(&self.shared_pointers);
-        let count = snap.len();
-        worker.leave();
-        count
+        snap.len()
+    }
+
+    /// Execute a batch of query nodes under a single QSBR pin.
+    ///
+    /// This is the primary API for callers that process multiple queries
+    /// at once (e.g. a network session handling a Redis pipeline). The
+    /// caller does not need to know about `WorkerState` or QSBR epochs.
+    pub fn execute_batch<'b, F>(&self, nodes: &[QueryNode<'b>], cb: F)
+    where
+        F: FnMut(QueryResult),
+    {
+        let q = Query::new(self);
+        q.execute_with_cb(nodes, cb);
     }
 }

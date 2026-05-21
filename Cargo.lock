@@ -242,9 +242,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "dualcache-ff"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9435a52d0d054528be9936002cad1eea5a2725d37f4565b05737adf3036e8f0c"
+checksum = "4fa887c04bdf6d3455ce46008e37619d177319d2843926e104d2bfbe6f647a51"
 dependencies = [
  "ahash",
 ]
