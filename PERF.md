@@ -1,13 +1,13 @@
 # cdDB Performance Audit Report
 
-## Version 0.2.2
+## Version 0.2.3
 
 ### 1. Test Environment
 
 | Item | Specification |
 |------|---------------|
 | **Hardware** | Mac (Apple Silicon) |
-| **Software** | Rust 2024 Edition, cdDB v0.2.2, dualcache-ff v0.2.2 |
+| **Software** | Rust 2024 Edition, cdDB v0.2.3, dualcache-ff v0.2.2 |
 | **Optimization Level** | Release Profile (`-C opt-level=3`) |
 | **Concurrency Configuration** | 4 Reader Threads (Physical Cores) |
 | **Benchmark Framework** | Criterion.rs v0.5 & Thread-Spawning Stress Tests |
@@ -94,4 +94,5 @@
 | **v0.1.0** | Basic architecture, tokio/serde/bincode | ~900k | — | — | — | Heavy |
 | **v0.2.0** | Wait-Free RCU + Zero-Allocation + NoStd + Wait-Free Heat Tracker | ~8.38M | ~15.58M | — | 542 ns | ahash + dualcache-ff |
 | **v0.2.1** | Eliminate QSBR double-enter in column getters + `execute_batch` API | ~9.25M | ~15.62M | — | 459 ns | ahash + dualcache-ff |
-| **v0.2.2** | Retest & bench with `dualcache-ff 0.2.2` upgrade, refresh metrics. Purged spurious epoch-write overhead from columnar reads. | **~9.73M** | **~20.55M** | **~1.73B** | **416 ns** | ahash + dualcache-ff |
+| **v0.2.2** | Retest & bench with `dualcache-ff 0.2.2` upgrade, refresh metrics. | **~9.47M** | **~12.43M** | — | **500 ns** | ahash + dualcache-ff |
+| **v0.2.3** | Purged spurious epoch-write overhead from columnar reads using pinned APIs. | **~9.73M** | **~20.55M** | **~1.73B** | **416 ns** | ahash + dualcache-ff |
