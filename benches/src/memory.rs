@@ -1,6 +1,4 @@
-use cdDB::{CdDBDispatcher, WriteCommand, Attributes, Storage};
 use criterion::{criterion_group, criterion_main, Criterion};
-use std::sync::Arc;
 
 fn memory_benchmark(c: &mut Criterion) {
     // Memory benchmarking is usually done with external tools like heaptrack,
