@@ -31,7 +31,7 @@ Add `cdDB` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cdDB = "0.2.1"
+cdDB = "0.2.2"
 ```
 
 ### Basic Usage (Synchronous)
@@ -95,20 +95,20 @@ cargo bench -p cdDB-benches
 cargo test --release -p cdDB-benches --test read_pressure_benchmark -- --nocapture
 ```
 
-### Latest Audit Results (v0.2.1, Apple Silicon, Release Profile)
+### Latest Audit Results (v0.2.2, Apple Silicon, Release Profile)
 
 | Metric | Value |
 |--------|-------|
-| **Single-Thread Read Latency** | ~48.6 ns (hot path, wait-free RCU) |
-| **Bloom Filter Miss Latency** | ~22.5 ns (disk I/O avoided) |
-| **Single-Thread Read Throughput** | ~9.25M QPS |
-| **4-Thread Read Throughput (Criterion)** | ~15.62M QPS |
-| **4-Thread Pressure Throughput (wall-clock)** | ~5.76M QPS (Get + Link composite ops) |
-| **4-Thread P50 Latency** | 459 ns |
-| **4-Thread P99 Latency** | 1.83 µs |
-| **4-Thread Tail Factor (P99/P50)** | 3.99x (proves wait-free stability) |
-| **Write Throughput** | ~5.07M items/s (1000-item batch insert) |
-| **Columnar Scan Advantage** | **287x faster** than `Vec<Struct>` (DOD benefit) |
+| **Single-Thread Read Latency** | ~38.3 ns (hot path, wait-free RCU) |
+| **Bloom Filter Miss Latency** | ~19.0 ns (disk I/O avoided) |
+| **Single-Thread Read Throughput** | ~9.47M QPS |
+| **4-Thread Read Throughput (Criterion)** | ~12.43M QPS |
+| **4-Thread Pressure Throughput (wall-clock)** | ~5.90M QPS (Get + Link composite ops) |
+| **4-Thread P50 Latency** | 500 ns |
+| **4-Thread P99 Latency** | 1.92 µs |
+| **4-Thread Tail Factor (P99/P50)** | 3.83x (proves wait-free stability) |
+| **Write Throughput** | ~5.42M items/s (1000-item batch insert) |
+| **Columnar Scan Advantage** | **238x faster** than `Vec<Struct>` (DOD benefit) |
 | **Cold Data Promotion Speedup** | ~330x after promotion to columnar memory cache |
 
 For detailed metrics and historical evolution, see [PERF.md](PERF.md).
