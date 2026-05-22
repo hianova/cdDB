@@ -10,10 +10,14 @@ cdDB is designed as an extreme-performance, in-memory acceleration layer with ti
     *   **Reads**: Implements safe, zero-lock **Wait-Free** reads using Read-Copy-Update (RCU) with a custom **QSBR (Quiescent State Based Reclamation)** scheme. This avoids runtime scheduling overhead, achieving P50 read latency as low as **~44ns** and P99 tail latency under **~2µs**.
 *   **Tiered Storage 2.0**:
     *   Integrates **DualCache-FF** for high-frequency O(1) heat tracking.
-    *   **Storage Hardening / I/O Optimization**:
-        *   **Synchronous I/O**: Employs blocking synchronous I/O for cold data, which offers superior predictability, stability, and lower state-machine overhead than async runtimes during large sequential scans.
+    *   **Storage Hardening & I/O Optimization**:
+        *   **Append-Only Sequential Log (`entities.bin`)**: Replaces the old filesystem-torturing "one-file-per-KV" (`entity_<id>.bin`) design. All partition data is written sequentially to a single `entities.bin` file per partition.
+        *   **In-Memory Disk Index Reconstruction**: An in-memory index (`disk_index`) mapping entity IDs to `(offset, length)` on disk is sequentially rebuilt from `entities.bin` on startup, avoiding metadata system calls during scans.
+        *   **Memory-Buffered Write Path**: Long-held persistent `BufWriter` handles with 64KB buffering convert high-frequency entity/WAL writes into efficient memory copies, followed by a manual batch `flush()` (group commit) at the end of partition loop cycles.
+        *   **Synchronous I/O**: Employs blocking synchronous I/O for cold data, offering superior predictability, stability, and lower state-machine overhead than async runtimes.
         *   **Block Pre-fetching**: Automatically pre-fetches adjacent disk blocks during disk page faults to mask physical hardware latency.
-        *   **Dynamic Bloom Filter**: Saturation-aware bloom filter. When saturation exceeds 70%, the bloom filter capacity automatically doubles and is rebuilt from disk to prevent partition misses.
+        *   **Dynamic Bloom Filter**: Saturation-aware bloom filter. When saturation exceeds 70%, the bloom filter capacity automatically doubles and is rebuilt directly from memory using the `disk_index` keys, completely avoiding directory scanning.
+*   **Bounded Dispatcher Channels**: Switches the partition message queues from unbounded channels to a bounded `sync_channel(10000)` configuration to prevent unbounded heap memory growth and scheduler jitter under intense write pressure.
 *   **Embedded Ready (NoStd Architecture)**: Decoupled entirely from the Rust `std` library. Utilizing the platform abstraction layer (`platform.rs`), cdDB can run on bare-metal systems, custom kernels, or real-time operating systems (RTOS).
 *   **Platform Abstraction Layer (PAL)**: Declares modular traits for `FileSystem`, `ThreadManager`, and `MessageQueue`, isolating physical I/O and runtime scheduling from core database engines.
 
@@ -47,9 +51,10 @@ pub struct ColumnArray<T> {
 ## 3. Key Workflows
 
 ### 3.1 Write path: Group Commit
-1.  **Command Batching**: The partition thread aggressively drains commands from the crossbeam message queue into a batch buffer.
-2.  **Batch WAL Log**: Write commands are serialized and persisted in a single WAL write/flush syscall, minimizing physical disk latency.
-3.  **Single RCU Swap**: The thread constructs the updated local pointer snapshot and executes a single atomic pointer exchange (`swap_ptr`), committing all changes at once.
+1.  **Command Batching**: The partition thread drains commands from the bounded synchronization channel into a batch buffer (up to 1000 commands).
+2.  **Buffered WAL & Entity Append**: Write commands are sequentially appended to both the pre-opened stateful WAL log and the partition's `entities.bin` file using 64KB memory-buffered `BufWriter` instances. This converts frequent, fine-grained writes into fast CPU cache memory copies.
+3.  **Single RCU Swap**: The thread constructs the updated local pointer snapshot and executes a single atomic pointer exchange (`swap_ptr`), committing all memory changes at once.
+4.  **Batch Group Commit Flush**: At the end of the partition batch loop, `self.storage.flush()` and `self.wal.flush()` are triggered to execute a single, aggregated filesystem `flush` and `sync_all` (fsync) system call, guaranteeing physical ACID durability under extremely low latency.
 
 ### 3.2 Read Path: Wait-Free & Promotion
 1.  **Bloom Filter Check**: Quickly filters out requests for non-existent entities, avoiding useless disk page faults.

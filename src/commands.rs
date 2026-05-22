@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use crate::AHashMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use crate::partition::MultiVectorPointer;
@@ -17,7 +17,7 @@ pub struct Attributes<V>(AHashMap<String, V>);
 
 impl<V> Attributes<V> {
     pub fn new() -> Self {
-        Self(AHashMap::new())
+        Self(AHashMap::default())
     }
 
     pub fn insert(&mut self, key: String, value: V) {
@@ -48,7 +48,7 @@ impl<V> Attributes<V> {
     ) -> Option<Self> {
         let count = u32::from_le_bytes(buf.get(*pos..*pos + 4)?.try_into().ok()?) as usize;
         *pos += 4;
-        let mut map = AHashMap::with_capacity(count);
+        let mut map = AHashMap::with_capacity_and_hasher(count, Default::default());
         for _ in 0..count {
             let k_len = u32::from_le_bytes(buf.get(*pos..*pos + 4)?.try_into().ok()?) as usize;
             *pos += 4;
@@ -69,7 +69,7 @@ impl<V> From<AHashMap<String, V>> for Attributes<V> {
 
 impl<V> IntoIterator for Attributes<V> {
     type Item = (String, V);
-    type IntoIter = <ahash::AHashMap<String, V> as IntoIterator>::IntoIter;
+    type IntoIter = <crate::AHashMap<String, V> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()

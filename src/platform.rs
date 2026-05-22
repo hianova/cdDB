@@ -1,11 +1,14 @@
 #[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
 pub use spin::Mutex;
 
 #[cfg(feature = "std")]
 pub use std::sync::Mutex;
 
 use alloc::vec::Vec;
-use alloc::string::{String, ToString};
+use alloc::string::String;
+#[cfg(feature = "std")]
+use alloc::string::ToString;
 
 pub trait FileSystem: Send + Sync {
     fn write(&self, path: &str, data: &[u8]) -> Result<(), String>;
@@ -14,6 +17,21 @@ pub trait FileSystem: Send + Sync {
     fn exists(&self, path: &str) -> bool;
     fn create_dir_all(&self, path: &str) -> Result<(), String>;
     fn read_dir(&self, path: &str) -> Result<Vec<String>, String>;
+
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        let all = self.read(path)?;
+        let start = offset as usize;
+        if start + len <= all.len() {
+            Ok(all[start..start + len].to_vec())
+        } else {
+            Err("Read out of bounds".to_string())
+        }
+    }
+
+    fn file_size(&self, path: &str) -> Result<u64, String> {
+        let bytes = self.read(path)?;
+        Ok(bytes.len() as u64)
+    }
 }
 
 pub trait ThreadManager: Send + Sync {
@@ -37,6 +55,19 @@ impl FileSystem for StdFileSystem {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e: std::io::Error| e.to_string())?;
         file.write_all(data).map_err(|e: std::io::Error| e.to_string())
+    }
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+        use std::io::{Read, Seek};
+        let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        file.seek(std::io::SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+        let mut buf = alloc::vec![0; len];
+        file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+        Ok(buf)
+    }
+    fn file_size(&self, path: &str) -> Result<u64, String> {
+        std::fs::metadata(path)
+            .map(|m| m.len())
+            .map_err(|e| e.to_string())
     }
     fn exists(&self, path: &str) -> bool {
         std::path::Path::new(path).exists()
@@ -95,7 +126,7 @@ pub trait MessageSender: Send + Sync {
 #[cfg(feature = "std")]
 #[allow(dead_code)]
 pub struct StdMessageSender {
-    pub tx: std::sync::mpsc::Sender<crate::commands::PartitionCommand>,
+    pub tx: std::sync::mpsc::SyncSender<crate::commands::PartitionCommand>,
 }
 
 #[cfg(feature = "std")]

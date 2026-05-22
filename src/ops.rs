@@ -1,7 +1,8 @@
 use crate::commands::Attributes;
-use ahash::AHashMap;
+use crate::AHashMap;
 use alloc::string::{String, ToString};
 use alloc::format;
+use alloc::vec::Vec;
 
 /// IT Operations Log Levels
 #[derive(Debug, Clone)]
@@ -30,13 +31,13 @@ impl ITOpsRecord {
     /// Converts the structured record into cdDB compatible attributes.
     /// Usage percentages are scaled by 1000 for precision in u32.
     pub fn to_cd_db_params(&self) -> (Attributes<String>, Attributes<u32>) {
-        let mut attrs = AHashMap::new();
+        let mut attrs = AHashMap::default();
         attrs.insert("service".to_string(), self.service.clone());
         attrs.insert("node".to_string(), self.node.clone());
         attrs.insert("level".to_string(), format!("{:?}", self.level));
         attrs.insert("message".to_string(), self.message.clone());
 
-        let mut attrs_int = AHashMap::new();
+        let mut attrs_int = AHashMap::default();
         attrs_int.insert("timestamp".to_string(), (self.timestamp % (u32::MAX as u64)) as u32);
         attrs_int.insert("cpu_milli".to_string(), (self.cpu_usage * 1000.0) as u32);
         attrs_int.insert("mem_milli".to_string(), (self.mem_usage * 1000.0) as u32);
@@ -58,7 +59,7 @@ impl ITOpsIngest for ITOpsRecord {
             entity_id,
             attributes,
             attributes_int,
-            attributes_blob: crate::commands::Attributes::new(),
+            attributes_blob: crate::commands::Attributes::<Vec<u8>>::new(),
         }
     }
 }

@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use crate::AHashMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::vec;
@@ -11,7 +11,7 @@ use std::sync::Mutex;
 #[cfg(not(feature = "std"))]
 use spin::Mutex;
 
-use dualcache_ff::DualCacheFF;
+use crate::{DualCacheFF, Config};
 use crate::bloom::SimpleBloom;
 
 use crate::column::Columns;
@@ -68,7 +68,7 @@ impl Partition {
             wal,
             qsbr: QsbrManager::new(workers),
             storage,
-            hot_index: DualCacheFF::new(dualcache_ff::Config::with_memory_budget(100, 60)),
+            hot_index: DualCacheFF::new(Config::with_memory_budget(100, 60)),
             bloom_filter,
             bloom_count: 0,
             bloom_bits,
@@ -92,28 +92,31 @@ impl Partition {
     }
 
     fn rebuild_bloom_filter(&mut self) {
-        #[cfg(feature = "std")]
+        let _old_bits = self.bloom_bits;
+        self.bloom_bits *= 2;
+        let mut new_bloom = SimpleBloom::new(self.bloom_bits);
+        let mut count = 0;
+
         {
-            let _old_bits = self.bloom_bits;
-            self.bloom_bits *= 2;
-            let mut new_bloom = SimpleBloom::new(self.bloom_bits);
-            let mut count = 0;
+            #[cfg(feature = "std")]
+            let index = self.storage.disk_index.lock().unwrap();
+            #[cfg(not(feature = "std"))]
+            let index = self.storage.disk_index.lock();
 
-            if let Ok(names) = self.fs.read_dir(&self.storage.base_path) {
-                for name in names {
-                    if name.starts_with("entity_") && name.ends_with(".bin") {
-                        if let Ok(id) = name[7..name.len() - 4].parse::<usize>() {
-                            new_bloom.insert(&id);
-                            count += 1;
-                        }
-                    }
-                }
+            for &id in index.keys() {
+                new_bloom.insert(&id);
+                count += 1;
             }
-
-            let mut bloom = self.bloom_filter.lock().unwrap();
-            *bloom = new_bloom;
-            self.bloom_count = count;
         }
+
+        {
+            #[cfg(feature = "std")]
+            let mut bloom = self.bloom_filter.lock().unwrap();
+            #[cfg(not(feature = "std"))]
+            let mut bloom = self.bloom_filter.lock();
+            *bloom = new_bloom;
+        }
+        self.bloom_count = count;
     }
 
     pub fn run(mut self) {
@@ -150,6 +153,7 @@ impl Partition {
             }
 
             self.apply_batch_commands(commands);
+            let _ = self.storage.flush();
             self.qsbr.maintenance();
         }
     }
@@ -209,7 +213,7 @@ impl Partition {
         attributes_int: Attributes<u32>,
         attributes_blob: Attributes<Vec<u8>>,
     ) {
-        let mut new_indices = AHashMap::new();
+        let mut new_indices = AHashMap::default();
 
         self.update_bloom(entity_id);
 
@@ -253,7 +257,7 @@ impl Partition {
     }
 
     fn process_promote(&mut self, next: &mut AHashMap<usize, MultiVectorPointer>, data: EntityData) -> MultiVectorPointer {
-        let mut new_indices = AHashMap::new();
+        let mut new_indices = AHashMap::default();
         self.update_bloom(data.entity_id);
         for (name, val) in data.attributes {
             let col = self.get_or_create_column_str(&name);

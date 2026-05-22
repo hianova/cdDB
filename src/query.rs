@@ -5,6 +5,7 @@ use crate::partition::MultiVectorPointer;
 use crate::dispatcher::PartitionRoute;
 use crate::qsbr::WorkerState;
 use crate::unsafe_core::load_ref;
+#[cfg(feature = "std")]
 use crate::commands::PartitionCommand;
 
 /// 4. 查詢接口 (Query Engine)

@@ -1,6 +1,6 @@
 [package]
 name = "cdDB"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 license = "MIT"
 authors = ["hianova"]
@@ -21,8 +21,9 @@ path = "examples/it_ops_demo.rs"
 [dependencies]
 spin = "0.9"
 
-ahash = "0.8"
-dualcache-ff = "0.2.2"
+ahash = { version = "0.8", default-features = false, features = ["no-rng"] }
+dualcache-ff = { version = "0.2.2", optional = true, default-features = false }
+hashbrown = { version = "0.14", default-features = false, features = ["alloc"] }
 
 [workspace]
 members = [
@@ -32,5 +33,6 @@ members = [
 resolver = "2"
 
 [features]
-default = ["std"]
-std = ["ahash/std"]
+default = ["std", "dualcache-ff"]
+std = ["ahash/std", "dualcache-ff?/std"]
+dualcache-ff = ["dep:dualcache-ff"]

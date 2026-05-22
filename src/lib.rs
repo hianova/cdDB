@@ -60,11 +60,14 @@ mod ops;
 mod bloom;
 mod wal;
 
+#[cfg(not(feature = "dualcache-ff"))]
+mod dualcache_stub;
+
 // Re-export public types for API compatibility
 pub use column::{Columns, ColumnArray};
 pub use commands::{Attributes, WriteCommand, PartitionCommand};
 pub use partition::{MultiVectorPointer, Partition};
-pub use query::{QueryNode, AggregateOp, CdDbQuery, QueryResult, Query};
+pub use query::{QueryNode, AggregateOp, CdDbQuery, QueryResult, Query, QuerySession};
 pub use dispatcher::{CdDBDispatcher, PartitionRoute};
 #[cfg(feature = "std")]
 pub use dispatcher::UserWriter;
@@ -72,3 +75,14 @@ pub use qsbr::{QsbrManager, WorkerState};
 pub use storage::{Storage, EntityData};
 pub use ops::{ITOpsRecord, LogLevel, ITOpsIngest};
 pub use wal::{WalProvider, StdWal, NoopWal};
+pub use platform::FileSystem;
+
+#[cfg(feature = "dualcache-ff")]
+pub use dualcache_ff::{DualCacheFF, Config};
+#[cfg(not(feature = "dualcache-ff"))]
+pub use dualcache_stub::{DualCacheFF, Config};
+
+#[cfg(feature = "std")]
+pub type AHashMap<K, V> = ahash::AHashMap<K, V>;
+#[cfg(not(feature = "std"))]
+pub type AHashMap<K, V> = hashbrown::HashMap<K, V, core::hash::BuildHasherDefault<ahash::AHasher>>;

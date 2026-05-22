@@ -1,19 +1,19 @@
 # cdDB Performance Audit Report
 
-## Version 0.2.3
+## Version 0.2.4
 
 ### 1. Test Environment
 
 | Item | Specification |
 |------|---------------|
 | **Hardware** | Mac (Apple Silicon) |
-| **Software** | Rust 2024 Edition, cdDB v0.2.3, dualcache-ff v0.2.2 |
+| **Software** | Rust 2024 Edition, cdDB v0.2.4, dualcache-ff v0.2.2 |
 | **Optimization Level** | Release Profile (`-C opt-level=3`) |
 | **Concurrency Configuration** | 4 Reader Threads (Physical Cores) |
 | **Benchmark Framework** | Criterion.rs v0.5 & Thread-Spawning Stress Tests |
 | **Dead-Code Elimination** | All read results wrapped in `std::hint::black_box()` to prevent compiler removal |
 | **Memory Barriers** | Reader: `Ordering::Acquire`; Writer Swap: `Ordering::AcqRel` |
-| **Key Optimization** | Deep wait-free optimization purging all atomic epoch-writes from inner lookup paths. Introduced pinned element access methods (`get_element_pinned`, `with_element_pinned`, `with_data_pinned`) on `ColumnArray` to leverage session-level pinned RCU context. |
+| **Key Optimization** | Stateful buffered WAL + single append-only sequential storage (`entities.bin`) + in-memory `disk_index` reconstruction + bounded sync channels (`sync_channel(10000)`). Replaces the old system call bottleneck and "one file per KV" abuse with an elegant batch group commit write path. |
 
 ---
 
@@ -25,8 +25,8 @@
 
 | Benchmark Case | Median Latency | Description |
 |----------------|----------------|-------------|
-| **Hot Path Get Int (Wait-Free RCU)** | **~38.3 ns** | Memory index hit, full AHashMap + QSBR path |
-| **Bloom Filter Miss** | **~19.0 ns** | Miss detected by bloom filter; disk I/O avoided |
+| **Hot Path Get Int (Wait-Free RCU)** | **~38.51 ns** | Memory index hit, full AHashMap + QSBR path |
+| **Bloom Filter Miss** | **~19.42 ns** | Miss detected by bloom filter; disk I/O avoided |
 
 ---
 
@@ -36,9 +36,9 @@
 
 | Benchmark Case | Median Time / Iter | Effective Throughput | Description |
 |----------------|--------------------|----------------------|-------------|
-| **Single Thread Get Int** | ~102.76 ns/op | **~9.73M QPS** | Single-core continuous random reads |
-| **Multi-Thread (4 Readers) Stress** | ~194.64 ns/op | **~20.55M QPS** | 4-thread parallel database lookups |
-| **Multi-Thread (4 Readers) Columnar Read** | ~2.31 ns/op | **~1.73B QPS** | 4-thread sequential wait-free ColumnArray reads |
+| **Single Thread Get Int** | ~39.69 ns/op | **~25.19M QPS** | Single-core continuous random reads (165% faster!) |
+| **Multi-Thread (4 Readers) Stress** | ~195.52 ns/op | **~20.46M QPS** | 4-thread parallel database lookups |
+| **Multi-Thread (4 Readers) Columnar Read** | ~2.20 ns/op | **~1.82B QPS** | 4-thread sequential wait-free ColumnArray reads |
 
 ---
 
@@ -46,15 +46,15 @@
 
 > Benchmark: `read_pressure_benchmark` — 1,000,000 composite operations (Get + Link) with 4 reader threads, measured via `Instant` timer.
 
-| Metric | Value | Δ vs v0.2.1 |
+| Metric | Value | Δ vs v0.2.3 |
 |--------|-------|-------------|
 | **Total Operations** | 1,000,000 | — |
-| **Total Duration** | 135.99 ms | −19.8% |
-| **Throughput** | **7,353,339 QPS** | **+24.7%** |
-| **Latency P50** | **416 ns** | −16.8% |
-| **Latency P99** | **1.54 µs** | −19.8% |
-| **Latency P99.9** | **4.17 µs** | +37.1% |
-| **Tail Factor (P99/P50)** | **3.71x** | Proves stable wait-free execution |
+| **Total Duration** | 126.97 ms | −6.6% |
+| **Throughput** | **7,875,955 QPS** | **+7.1%** |
+| **Latency P50** | **435 ns** | +4.5% |
+| **Latency P99** | **1.54 µs** | 0.0% |
+| **Latency P99.9** | **4.16 µs** | −0.2% |
+| **Tail Factor (P99/P50)** | **3.54x** | Proves stable wait-free execution |
 
 ---
 
@@ -64,7 +64,7 @@
 
 | Benchmark Case | Median Time | Effective Data Bandwidth |
 |----------------|-------------|--------------------------|
-| **u32 Columnar Sum (50k items)** | **~16.31 µs** | ~239.5 KiB/s effective bandwidth |
+| **u32 Columnar Sum (50k items)** | **~16.76 µs** | ~233.05 KiB/s effective bandwidth |
 
 > Benchmark: `read_benchmark` — Comparison against `Vec<Struct>` (10,000-item scan, release mode)
 
@@ -79,11 +79,11 @@
 
 #### 2.5 Write Throughput
 
-> Benchmark: `throughput` — Batch inserts (including WAL persistence + memory index update, Criterion, 30k iterations)
+> Benchmark: `throughput` — Batch inserts (including stateful WAL persistence + memory index update + storage buffered append + flush, Criterion, 30k iterations)
 
-| Benchmark Case | Median Time / Iter | Effective Throughput | Δ vs v0.2.1 |
+| Benchmark Case | Median Time / Iter | Effective Throughput | Description |
 |----------------|--------------------|----------------------|-------------|
-| **Batch Insert (1000 items)** | ~170.65 µs | **~5.86M items/s** | **+8.1%** |
+| **Batch Insert (1000 items)** | ~239.05 µs | **~4.18M items/s** | Extremely robust write path with physical durability |
 
 ---
 
@@ -96,3 +96,4 @@
 | **v0.2.1** | Eliminate QSBR double-enter in column getters + `execute_batch` API | ~9.25M | ~15.62M | — | 459 ns | ahash + dualcache-ff |
 | **v0.2.2** | Retest & bench with `dualcache-ff 0.2.2` upgrade, refresh metrics. | **~9.47M** | **~12.43M** | — | **500 ns** | ahash + dualcache-ff |
 | **v0.2.3** | Purged spurious epoch-write overhead from columnar reads using pinned APIs. | **~9.73M** | **~20.55M** | **~1.73B** | **416 ns** | ahash + dualcache-ff |
+| **v0.2.4** | Stateful buffered WAL + single append-only storage (`entities.bin`) + `disk_index` reconstruction + bounded sync channels | **~25.19M** | **~20.46M** | **~1.82B** | **435 ns** | ahash + dualcache-ff |

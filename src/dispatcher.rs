@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use crate::AHashMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
@@ -7,21 +7,26 @@ use crate::query::{Query, QueryNode, QueryResult};
 use core::sync::atomic::AtomicPtr;
 
 #[cfg(feature = "std")]
-use std::sync::{Mutex, mpsc::Sender};
+use std::sync::{Mutex, mpsc::SyncSender};
 #[cfg(not(feature = "std"))]
 use spin::Mutex;
 
 use crate::bloom::SimpleBloom;
-use dualcache_ff::DualCacheFF;
+use crate::{DualCacheFF, Config};
 
 use crate::column::{Columns, ColumnArray};
-use crate::commands::{PartitionCommand, WriteCommand};
-use crate::partition::{MultiVectorPointer, Partition};
+use crate::partition::MultiVectorPointer;
+#[cfg(feature = "std")]
+use crate::partition::Partition;
 use crate::qsbr::WorkerState;
 use crate::storage::Storage;
 use crate::unsafe_core::new_atomic_ptr;
 use crate::platform::{FileSystem, ThreadManager};
-use crate::wal::{WalProvider, StdWal, NoopWal};
+use crate::wal::{WalProvider, NoopWal};
+#[cfg(feature = "std")]
+use crate::wal::StdWal;
+#[cfg(feature = "std")]
+use crate::commands::{PartitionCommand, WriteCommand};
 
 /// 4. cdDB 全域入口與調度器 (Dispatcher)
 pub struct CdDBDispatcher {
@@ -39,7 +44,7 @@ impl CdDBDispatcher {
         thread_manager: Arc<dyn ThreadManager>,
     ) -> Self {
         Self {
-            route_table: AHashMap::new(),
+            route_table: AHashMap::default(),
             base_path,
             workers: Arc::new(Mutex::new(Vec::new())),
             fs,
@@ -90,7 +95,7 @@ impl CdDBDispatcher {
         path: String,
         wal: Arc<dyn WalProvider>,
     ) -> UserWriter {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(10000);
         let writer_tx_out = tx.clone();
         
         let (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers) = self.init_partition_state(&path);
@@ -155,10 +160,10 @@ impl CdDBDispatcher {
 
         let _ = self.fs.create_dir_all(&storage_path);
 
-        let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::new()));
+        let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
         let bloom_filter = Arc::new(Mutex::new(SimpleBloom::new(1024 * 1024)));
         let columns = Arc::new(new_atomic_ptr(Columns::new()));
-        let hot_index = Arc::new(DualCacheFF::new(dualcache_ff::Config::with_memory_budget(100, 60)));
+        let hot_index = Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60)));
         let workers = Arc::new(Mutex::new(Vec::new()));
         
         (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers)
@@ -230,7 +235,7 @@ impl Default for CdDBDispatcher {
 }
 
 #[cfg(feature = "std")]
-pub struct UserWriter(Sender<PartitionCommand>);
+pub struct UserWriter(SyncSender<PartitionCommand>);
 #[cfg(feature = "std")]
 impl UserWriter {
     pub fn send(&self, cmd: WriteCommand) -> Result<(), std::sync::mpsc::SendError<PartitionCommand>> {
@@ -241,7 +246,7 @@ impl UserWriter {
 #[derive(Clone)]
 pub struct PartitionRoute {
     #[cfg(feature = "std")]
-    pub writer_tx: Sender<PartitionCommand>,
+    pub writer_tx: SyncSender<PartitionCommand>,
     #[cfg(not(feature = "std"))]
     pub writer_tx: Arc<dyn crate::platform::MessageSender>,
     pub columns: Arc<AtomicPtr<Columns>>,

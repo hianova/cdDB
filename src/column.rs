@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use crate::AHashMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
@@ -17,9 +17,9 @@ pub struct Columns {
 impl Columns {
     pub fn new() -> Self {
         Self {
-            str_cols: AHashMap::new(),
-            int_cols: AHashMap::new(),
-            blob_cols: AHashMap::new(),
+            str_cols: AHashMap::default(),
+            int_cols: AHashMap::default(),
+            blob_cols: AHashMap::default(),
         }
     }
 }
