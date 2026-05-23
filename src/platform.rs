@@ -7,7 +7,6 @@ pub use std::sync::Mutex;
 
 use alloc::vec::Vec;
 use alloc::string::String;
-#[cfg(feature = "std")]
 use alloc::string::ToString;
 
 pub trait FileSystem: Send + Sync {
