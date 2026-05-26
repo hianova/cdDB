@@ -2,7 +2,7 @@ use crate::AHashMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use crate::platform::atomic::{AtomicBool, AtomicPtr, Ordering};
 use crate::unsafe_core::{load_clone, load_ref, new_atomic_ptr};
 use crate::qsbr::WorkerState;
 

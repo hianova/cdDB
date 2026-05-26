@@ -95,19 +95,19 @@ cargo bench -p cdDB-benches
 cargo test --release -p cdDB-benches --test read_pressure_benchmark -- --nocapture
 ```
 
-### Latest Audit Results (v0.2.3, Apple Silicon, Release Profile)
+### Latest Audit Results (v0.3.0, Apple Silicon, Release Profile)
 
 | Metric | Value |
 |--------|-------|
-| **Single-Thread Read Latency** | ~38.3 ns (hot path, wait-free RCU) |
-| **Bloom Filter Miss Latency** | ~19.0 ns (disk I/O avoided) |
-| **Single-Thread Read Throughput** | ~9.73M QPS |
-| **4-Thread Read Throughput (Criterion)** | ~20.55M QPS (Stress) / **~1.73B QPS** (Columnar DOD) |
+| **Single-Thread Read Latency** | ~35.5 ns (hot path, pure wait-free RCU) |
+| **Bloom Filter Miss Latency** | ~13.6 ns (disk I/O avoided, lock-free check) |
+| **Single-Thread Read Throughput** | ~10.19M QPS |
+| **4-Thread Read Throughput (Criterion)** | ~20.19M QPS (Stress) / **~2.02B QPS** (Columnar DOD) |
 | **4-Thread Pressure Throughput (wall-clock)** | **~7.35M QPS** (Get + Link composite ops) |
 | **4-Thread P50 Latency** | **416 ns** |
 | **4-Thread P99 Latency** | **1.54 µs** |
 | **4-Thread Tail Factor (P99/P50)** | **3.71x** (proves wait-free stability) |
-| **Write Throughput** | **~5.86M items/s** (1000-item batch insert) |
+| **Write Throughput** | **~10.19M items/s** (Async100ms Write-Behind WAL) |
 | **Columnar Scan Advantage** | **128x faster** than `Vec<Struct>` (DOD benefit) |
 | **Cold Data Promotion Speedup** | ~330x after promotion to columnar memory cache |
 

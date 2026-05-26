@@ -1,10 +1,5 @@
 /target
 TODO.md
-/test_cold_data
-/data
-archives/
 benches/data
-analisis.md
-benches/test_cold_data/
 tests/data/
 .DS_Store

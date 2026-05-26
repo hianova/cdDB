@@ -4,12 +4,12 @@ use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
 use crate::query::{Query, QueryNode, QueryResult};
-use core::sync::atomic::AtomicPtr;
+use crate::platform::atomic::AtomicPtr;
 
 #[cfg(feature = "std")]
 use std::sync::{Mutex, mpsc::SyncSender};
 #[cfg(not(feature = "std"))]
-use spin::Mutex;
+use crate::platform::Mutex;
 
 use crate::bloom::SimpleBloom;
 use crate::{DualCacheFF, Config};
@@ -18,7 +18,7 @@ use crate::column::{Columns, ColumnArray};
 use crate::partition::MultiVectorPointer;
 #[cfg(feature = "std")]
 use crate::partition::Partition;
-use crate::qsbr::WorkerState;
+use crate::qsbr::{WorkerState, WorkerNode};
 use crate::storage::Storage;
 use crate::unsafe_core::new_atomic_ptr;
 use crate::platform::{FileSystem, ThreadManager};
@@ -32,7 +32,7 @@ use crate::commands::{PartitionCommand, WriteCommand};
 pub struct CdDBDispatcher {
     pub route_table: AHashMap<String, PartitionRoute>,
     pub base_path: Option<String>,
-    pub workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
+    pub workers: Arc<AtomicPtr<WorkerNode>>,
     pub fs: Arc<dyn FileSystem>,
     pub thread_manager: Arc<dyn ThreadManager>,
 }
@@ -46,7 +46,7 @@ impl CdDBDispatcher {
         Self {
             route_table: AHashMap::default(),
             base_path,
-            workers: Arc::new(Mutex::new(Vec::new())),
+            workers: Arc::new(crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut())),
             fs,
             thread_manager,
         }
@@ -63,7 +63,7 @@ impl CdDBDispatcher {
 
     #[cfg(feature = "std")]
     pub fn register_partition(&mut self, path: String) -> UserWriter {
-        self.register_partition_with_wal(path, None)
+        self.register_partition_with_wal(path, None, crate::wal::WalMode::Sync)
     }
 
     #[cfg(feature = "std")]
@@ -72,7 +72,7 @@ impl CdDBDispatcher {
         path: String,
         _budget_bytes: usize,
     ) -> UserWriter {
-        self.register_partition_with_wal(path, None)
+        self.register_partition_with_wal(path, None, crate::wal::WalMode::Sync)
     }
 
     #[cfg(feature = "std")]
@@ -80,9 +80,10 @@ impl CdDBDispatcher {
         &mut self,
         path: String,
         wal_path: Option<String>,
+        wal_mode: crate::wal::WalMode,
     ) -> UserWriter {
         let wal: Arc<dyn WalProvider> = if let Some(p) = wal_path {
-            Arc::new(StdWal::new(p, self.fs.clone()))
+            Arc::new(StdWal::new(p, self.fs.clone(), wal_mode))
         } else {
             Arc::new(NoopWal)
         };
@@ -151,7 +152,7 @@ impl CdDBDispatcher {
         // In no_std, the user must manage the thread/loop for the Partition
     }
 
-    fn init_partition_state(&self, path: &str) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<Mutex<SimpleBloom>>, Arc<AtomicPtr<Columns>>, Arc<DualCacheFF<usize, ()>>, Arc<Mutex<Vec<Arc<WorkerState>>>>) {
+    fn init_partition_state(&self, path: &str) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<AtomicPtr<SimpleBloom>>, Arc<AtomicPtr<Columns>>, Arc<DualCacheFF<usize, ()>>, Arc<AtomicPtr<WorkerNode>>) {
         let storage_path = self
             .base_path
             .as_ref()
@@ -161,10 +162,10 @@ impl CdDBDispatcher {
         let _ = self.fs.create_dir_all(&storage_path);
 
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
-        let bloom_filter = Arc::new(Mutex::new(SimpleBloom::new(1024 * 1024)));
+        let bloom_filter = Arc::new(new_atomic_ptr(SimpleBloom::new(1024 * 1024)));
         let columns = Arc::new(new_atomic_ptr(Columns::new()));
         let hot_index = Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60)));
-        let workers = Arc::new(Mutex::new(Vec::new()));
+        let workers = Arc::new(crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut()));
         
         (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers)
     }
@@ -175,10 +176,10 @@ impl CdDBDispatcher {
         rx: std::sync::mpsc::Receiver<PartitionCommand>,
         columns: Arc<AtomicPtr<Columns>>,
         wal: Arc<dyn WalProvider>,
-        workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
+        workers: Arc<AtomicPtr<WorkerNode>>,
         storage_path: String,
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
-        bloom_filter: Arc<Mutex<SimpleBloom>>,
+        bloom_filter: Arc<AtomicPtr<SimpleBloom>>,
     ) {
         let fs_rt = self.fs.clone();
         let wal_rt = wal.clone();
@@ -252,9 +253,9 @@ pub struct PartitionRoute {
     pub columns: Arc<AtomicPtr<Columns>>,
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
     pub hot_index: Arc<DualCacheFF<usize, ()>>,
-    pub bloom_filter: Arc<Mutex<SimpleBloom>>,
+    pub bloom_filter: Arc<AtomicPtr<SimpleBloom>>,
     pub storage: Arc<Storage>,
-    pub workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
+    pub workers: Arc<AtomicPtr<WorkerNode>>,
     pub wal: Arc<dyn WalProvider>,
 }
 
@@ -265,11 +266,22 @@ impl PartitionRoute {
 
     pub fn register_worker(&self) -> Arc<WorkerState> {
         let worker = Arc::new(WorkerState::new());
-        #[cfg(feature = "std")]
-        let mut workers = self.workers.lock().unwrap();
-        #[cfg(not(feature = "std"))]
-        let mut workers = self.workers.lock();
-        workers.push(Arc::clone(&worker));
+        let new_node = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(crate::qsbr::WorkerNode {
+            worker: Arc::clone(&worker),
+            next: crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut()),
+        }));
+        loop {
+            let head = self.workers.load(crate::platform::atomic::Ordering::Acquire);
+            unsafe { (*new_node).next.store(head, crate::platform::atomic::Ordering::Relaxed); }
+            if self.workers.compare_exchange(
+                head,
+                new_node,
+                crate::platform::atomic::Ordering::Release,
+                crate::platform::atomic::Ordering::Relaxed,
+            ).is_ok() {
+                break;
+            }
+        }
         worker
     }
 

@@ -82,7 +82,4 @@ pub use dualcache_ff::{DualCacheFF, Config};
 #[cfg(not(feature = "dualcache-ff"))]
 pub use dualcache_stub::{DualCacheFF, Config};
 
-#[cfg(feature = "std")]
-pub type AHashMap<K, V> = ahash::AHashMap<K, V>;
-#[cfg(not(feature = "std"))]
-pub type AHashMap<K, V> = hashbrown::HashMap<K, V, core::hash::BuildHasherDefault<ahash::AHasher>>;
+pub type AHashMap<K, V> = hashbrown::HashMap<K, V>;

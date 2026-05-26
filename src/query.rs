@@ -241,16 +241,10 @@ impl<'a> QuerySession<'a> {
             return Some(p);
         }
 
-        // 2. Bloom Filter Check (Locks for disk read avoidance)
-        {
-            #[cfg(feature = "std")]
-            let bloom = self.route.bloom_filter.lock().unwrap();
-            #[cfg(not(feature = "std"))]
-            let bloom = self.route.bloom_filter.lock();
-            
-            if !bloom.contains(&entity_id) {
-                return None;
-            }
+        // 2. Bloom Filter Check
+        let bloom = crate::unsafe_core::load_ref(&self.route.bloom_filter);
+        if !bloom.contains(&entity_id) {
+            return None;
         }
 
         // 3. Page Fault (Synchronous Disk Load)
@@ -360,10 +354,7 @@ impl<'a> Drop for QuerySession<'a> {
 
 impl<'a> Query<'a> {
     pub fn seed_bloom_filter(&self, entity_id: usize) {
-        #[cfg(feature = "std")]
-        let mut bloom = self.route.bloom_filter.lock().unwrap();
-        #[cfg(not(feature = "std"))]
-        let mut bloom = self.route.bloom_filter.lock();
+        let bloom = crate::unsafe_core::load_ref(&self.route.bloom_filter);
         bloom.insert(&entity_id);
     }
 

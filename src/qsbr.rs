@@ -1,18 +1,17 @@
-use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::platform::atomic::{AtomicUsize, AtomicPtr, Ordering};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::unsafe_core::GarbageEntry;
-// For no_std, we use a custom Mutex if std is not available.
-// For now, we'll keep using spin::Mutex if not std.
-#[cfg(feature = "std")]
-use std::sync::Mutex;
-#[cfg(not(feature = "std"))]
-use spin::Mutex;
+
+pub struct WorkerNode {
+    pub worker: Arc<WorkerState>,
+    pub next: AtomicPtr<WorkerNode>,
+}
 
 /// 全域邏輯時鐘
-pub static GLOBAL_EPOCH: AtomicUsize = AtomicUsize::new(1);
+pub static GLOBAL_EPOCH: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);
 
-/// Worker 狀態：0 代表靜止 (Quiescent), >0 代表正在讀取的 Epoch
+/// RCU 的執行緒本地狀態
 pub struct WorkerState {
     pub local_epoch: AtomicUsize,
 }
@@ -27,8 +26,8 @@ impl WorkerState {
     /// 進入讀取路徑 (打卡)
     #[inline(always)]
     pub fn enter(&self) {
-        let current = GLOBAL_EPOCH.load(Ordering::Relaxed);
-        self.local_epoch.store(current, Ordering::Release);
+        let global = GLOBAL_EPOCH.load(Ordering::Acquire);
+        self.local_epoch.store(global, Ordering::Release);
     }
 
     /// 離開讀取路徑 (登出)
@@ -40,12 +39,12 @@ impl WorkerState {
 
 /// QSBR 管理器：追蹤所有 Worker 並執行垃圾回收
 pub struct QsbrManager {
-    workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
+    workers: Arc<AtomicPtr<WorkerNode>>,
     garbage: Vec<GarbageEntry>,
 }
 
 impl QsbrManager {
-    pub fn new(workers: Arc<Mutex<Vec<Arc<WorkerState>>>>) -> Self {
+    pub fn new(workers: Arc<AtomicPtr<WorkerNode>>) -> Self {
         Self {
             workers,
             garbage: Vec::new(),
@@ -67,24 +66,25 @@ impl QsbrManager {
         // 1. 推進全域時鐘
         GLOBAL_EPOCH.fetch_add(1, Ordering::Relaxed);
 
-        // 2. 獲取所有活躍 Worker 的最小 Epoch
-        let mut min_active = usize::MAX;
-        {
-            #[cfg(feature = "std")]
-            let workers_guard = self.workers.lock().unwrap();
-            #[cfg(not(feature = "std"))]
-            let workers_guard = self.workers.lock();
-            
-            for worker in workers_guard.iter() {
-                let e = worker.local_epoch.load(Ordering::Acquire);
-                if e != 0 && e < min_active {
-                    min_active = e;
-                }
+        let current_global = GLOBAL_EPOCH.load(Ordering::Acquire);
+        let mut min_epoch = current_global;
+
+        let mut curr_ptr = self.workers.load(Ordering::Acquire);
+        while !curr_ptr.is_null() {
+            let node = unsafe { &*curr_ptr };
+            let epoch = node.worker.local_epoch.load(Ordering::Acquire);
+            if epoch != 0 && epoch < min_epoch {
+                min_epoch = epoch;
             }
+            curr_ptr = node.next.load(Ordering::Acquire);
+        }
+
+        if min_epoch == current_global {
+            GLOBAL_EPOCH.fetch_add(1, Ordering::Release);
         }
 
         // 3. 清理：如果垃圾的 Epoch < min_active，代表沒有 Worker 在看它
         // GarbageEntry implements Drop, so retain(false) will trigger the drop logic.
-        self.garbage.retain(|entry| entry.epoch >= min_active);
+        self.garbage.retain(|entry| entry.epoch >= min_epoch);
     }
 }

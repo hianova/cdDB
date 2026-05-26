@@ -4,6 +4,18 @@ use alloc::string::{String, ToString};
 use crate::commands::WriteCommand;
 use crate::platform::FileSystem;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WalMode {
+    Sync,
+    Async100ms,
+}
+
+impl Default for WalMode {
+    fn default() -> Self {
+        WalMode::Sync
+    }
+}
+
 pub trait WalProvider: Send + Sync {
     fn append(&self, cmd: &WriteCommand) -> Result<(), String>;
     fn append_batch(&self, commands: &[&WriteCommand]) -> Result<(), String>;
@@ -22,12 +34,15 @@ impl WalProvider for NoopWal {
 pub struct StdWal {
     pub path: String,
     pub fs: Arc<dyn FileSystem>,
+    pub mode: WalMode,
     #[cfg(feature = "std")]
-    pub writer: crate::platform::Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+    pub writer: Arc<crate::platform::Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    #[cfg(feature = "std")]
+    pub async_buffer: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
 }
 
 impl StdWal {
-    pub fn new(path: String, fs: Arc<dyn FileSystem>) -> Self {
+    pub fn new(path: String, fs: Arc<dyn FileSystem>, mode: WalMode) -> Self {
         #[cfg(feature = "std")]
         {
             use std::fs::OpenOptions;
@@ -38,14 +53,48 @@ impl StdWal {
                 .open(&path)
                 .ok()
                 .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
+            
+            let writer = Arc::new(crate::platform::Mutex::new(file_opt));
+            let async_buffer = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::with_capacity(10000)));
+
+            if mode == WalMode::Async100ms {
+                let bg_writer = Arc::clone(&writer);
+                let bg_buffer = Arc::clone(&async_buffer);
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        let mut local_buf = Vec::<Vec<u8>>::new();
+                        {
+                            let mut lock = bg_buffer.lock().unwrap();
+                            if !lock.is_empty() {
+                                core::mem::swap(&mut local_buf, &mut *lock);
+                            }
+                        }
+                        if !local_buf.is_empty() {
+                            let mut w_lock = bg_writer.lock().unwrap();
+                            if let Some(w) = w_lock.as_mut() {
+                                use std::io::Write;
+                                for buf in local_buf {
+                                    let _ = w.write_all(&buf);
+                                }
+                                let _ = w.flush();
+                                let _ = w.get_ref().sync_all();
+                            }
+                        }
+                    }
+                });
+            }
+
             Self {
                 path,
                 fs,
-                writer: crate::platform::Mutex::new(file_opt),
+                mode,
+                writer,
+                async_buffer,
             }
         }
         #[cfg(not(feature = "std"))]
-        Self { path, fs }
+        Self { path, fs, mode }
     }
 }
 
@@ -58,6 +107,12 @@ impl WalProvider for StdWal {
 
         #[cfg(feature = "std")]
         {
+            if self.mode == WalMode::Async100ms {
+                let mut lock = self.async_buffer.lock().unwrap();
+                lock.push(buf);
+                return Ok(());
+            }
+
             let mut lock = self.writer.lock().unwrap();
             if let Some(w) = lock.as_mut() {
                 use std::io::Write;
@@ -80,6 +135,12 @@ impl WalProvider for StdWal {
         if !buf.is_empty() {
             #[cfg(feature = "std")]
             {
+                if self.mode == WalMode::Async100ms {
+                    let mut lock = self.async_buffer.lock().unwrap();
+                    lock.push(buf);
+                    return Ok(());
+                }
+
                 let mut lock = self.writer.lock().unwrap();
                 if let Some(w) = lock.as_mut() {
                     use std::io::Write;
@@ -97,6 +158,10 @@ impl WalProvider for StdWal {
     fn checkpoint(&self) -> Result<(), String> {
         #[cfg(feature = "std")]
         {
+            if self.mode == WalMode::Async100ms {
+                // For async, we can optionally wait for buffer to drain or just flush writer.
+                // To be safe, we just flush the writer directly.
+            }
             let mut lock = self.writer.lock().unwrap();
             if let Some(w) = lock.as_mut() {
                 use std::io::Write;

@@ -48,7 +48,7 @@ impl<V> Attributes<V> {
     ) -> Option<Self> {
         let count = u32::from_le_bytes(buf.get(*pos..*pos + 4)?.try_into().ok()?) as usize;
         *pos += 4;
-        let mut map = AHashMap::with_capacity_and_hasher(count, Default::default());
+        let mut map = AHashMap::with_capacity(count);
         for _ in 0..count {
             let k_len = u32::from_le_bytes(buf.get(*pos..*pos + 4)?.try_into().ok()?) as usize;
             *pos += 4;

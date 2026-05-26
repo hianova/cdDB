@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicPtr, Ordering};
+use crate::platform::atomic::{AtomicPtr, Ordering};
 use alloc::boxed::Box;
 
 /// Safely load a reference from an AtomicPtr.

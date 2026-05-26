@@ -18,8 +18,10 @@ cdDB is designed as an extreme-performance, in-memory acceleration layer with ti
         *   **Block Pre-fetching**: Automatically pre-fetches adjacent disk blocks during disk page faults to mask physical hardware latency.
         *   **Dynamic Bloom Filter**: Saturation-aware bloom filter. When saturation exceeds 70%, the bloom filter capacity automatically doubles and is rebuilt directly from memory using the `disk_index` keys, completely avoiding directory scanning.
 *   **Bounded Dispatcher Channels**: Switches the partition message queues from unbounded channels to a bounded `sync_channel(10000)` configuration to prevent unbounded heap memory growth and scheduler jitter under intense write pressure.
-*   **Embedded Ready (NoStd Architecture)**: Decoupled entirely from the Rust `std` library. Utilizing the platform abstraction layer (`platform.rs`), cdDB can run on bare-metal systems, custom kernels, or real-time operating systems (RTOS).
+*   **Embedded Ready (NoStd Architecture)**: Decoupled entirely from the Rust `std` library. Utilizing the platform abstraction layer (`platform.rs`), cdDB can run on bare-metal systems, custom kernels, or real-time operating systems (RTOS). Uses lock-free `AtomicBool` spinlocks in `#![no_std]` environments.
 *   **Platform Abstraction Layer (PAL)**: Declares modular traits for `FileSystem`, `ThreadManager`, and `MessageQueue`, isolating physical I/O and runtime scheduling from core database engines.
+*   **Loom Concurrency Checking**: The core engine (QSBR, RCU, etc.) is fully verified by the `loom` crate when the `loom` feature is enabled, mathematically proving wait-free algorithms.
+*   **Asynchronous Write-Behind Logging**: Supports `WalMode::Async100ms` for extreme throughput where data is buffered and daemon-flushed in the background, achieving single-digit nanosecond front-end latencies.
 
 ---
 

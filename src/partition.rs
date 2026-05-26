@@ -3,20 +3,18 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::{String, ToString};
-use core::sync::atomic::AtomicPtr;
+use crate::platform::atomic::AtomicPtr;
 use crate::platform::FileSystem;
 
-#[cfg(feature = "std")]
-use std::sync::Mutex;
 #[cfg(not(feature = "std"))]
-use spin::Mutex;
+use crate::platform::Mutex;
 
 use crate::{DualCacheFF, Config};
 use crate::bloom::SimpleBloom;
 
 use crate::column::Columns;
 use crate::commands::{Attributes, PartitionCommand, WriteCommand};
-use crate::qsbr::{QsbrManager, WorkerState};
+use crate::qsbr::{QsbrManager, WorkerNode};
 use crate::storage::{Storage, EntityData};
 use crate::unsafe_core::{load_clone, swap_ptr};
 use crate::wal::WalProvider;
@@ -38,7 +36,7 @@ pub struct Partition {
     // 持久層與快照
     pub storage: Arc<Storage>,
     pub hot_index: DualCacheFF<usize, ()>, // Just for heat tracking
-    pub bloom_filter: Arc<Mutex<SimpleBloom>>,
+    pub bloom_filter: Arc<AtomicPtr<SimpleBloom>>,
 
     // WAL 支援
     pub wal: Arc<dyn WalProvider>,
@@ -52,11 +50,11 @@ impl Partition {
         writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
         columns: Arc<AtomicPtr<Columns>>,
         wal: Arc<dyn WalProvider>,
-        workers: Arc<Mutex<Vec<Arc<WorkerState>>>>,
+        workers: Arc<AtomicPtr<WorkerNode>>,
         storage_path: String,
         fs: Arc<dyn FileSystem>,
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
-        bloom_filter: Arc<Mutex<SimpleBloom>>,
+        bloom_filter: Arc<AtomicPtr<SimpleBloom>>,
     ) -> Self {
         let storage = Arc::new(Storage::new(storage_path, fs.clone()));
         let bloom_bits = 1024 * 1024;
@@ -78,10 +76,7 @@ impl Partition {
 
     fn update_bloom(&mut self, entity_id: usize) {
         {
-            #[cfg(feature = "std")]
-            let mut bloom = self.bloom_filter.lock().unwrap();
-            #[cfg(not(feature = "std"))]
-            let mut bloom = self.bloom_filter.lock();
+            let bloom = crate::unsafe_core::load_ref(&self.bloom_filter);
             bloom.insert(&entity_id);
             self.bloom_count += 1;
         }
@@ -94,7 +89,7 @@ impl Partition {
     fn rebuild_bloom_filter(&mut self) {
         let _old_bits = self.bloom_bits;
         self.bloom_bits *= 2;
-        let mut new_bloom = SimpleBloom::new(self.bloom_bits);
+        let new_bloom = SimpleBloom::new(self.bloom_bits);
         let mut count = 0;
 
         {
@@ -110,11 +105,7 @@ impl Partition {
         }
 
         {
-            #[cfg(feature = "std")]
-            let mut bloom = self.bloom_filter.lock().unwrap();
-            #[cfg(not(feature = "std"))]
-            let mut bloom = self.bloom_filter.lock();
-            *bloom = new_bloom;
+            crate::unsafe_core::swap_ptr(&self.bloom_filter, new_bloom);
         }
         self.bloom_count = count;
     }
