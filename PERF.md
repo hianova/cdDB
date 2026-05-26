@@ -1,43 +1,26 @@
-# cdDB Performance Report (Wait-Free RCU Restoration & Async100ms)
-*Generated from Criterion.rs output*
+# cdDB Performance Report (v0.3.0)
 
-## 1. Access Latency (Read Hot Path)
-By removing the `AtomicBool` spinlock and converting `SimpleBloom` to a fully lock-free `AtomicUsize` array, read latencies have dropped significantly.
+## DHAT Heap Profiling
 
-- **Hot Path Get Int (Wait-Free RCU)**: 
-  - Time: **35.503 ns**
-  - Change: **-13.53%** (Performance has improved)
-- **Bloom Filter Miss**: 
-  - Time: **13.646 ns** 
-  - Change: **-30.21%** (Massive improvement directly attributed to lock-free checking)
+Following the decoupling of the executor and transition towards const-generics based heap-free data structures, memory allocation behaviors in the wait-free engine were profiled using DHAT.
 
-## 2. Multi-Threaded Read Throughput
-With the restoration of $O(1)$ `AHashMap` and the eradication of hot-path Mutexes, cdDB achieves true linear scaling on multi-core reads.
+**Test Setup:**
+- 10,000 entities batch inserted into a single partition.
+- `SimpleBloom<1024>` constant generic configuration.
+- `AHashMap` routing table updates.
 
-- **Multi-Thread (4 Readers) Stress**: 
-  - Throughput: **20.188 Million elements/s**
-  - Time: **198.13 ns**
-- **Multi-Thread (4 Readers) Columnar Read**: 
-  - Throughput: **2.0192 Billion elements/s** (Gelem/s)
-  - Time: **1.9809 ns** 
-  - Change: **+12.70% throughput**
+### Allocation Metrics
 
-## 3. Write Throughput & Durability (Async100ms WAL)
-The introduction of `WalMode::Async100ms` completely decoupled the slow SSD sync loop from the frontend writer thread. The result is a historic increase in write throughput.
+- **Total Allocated**: 169.4 MB in 652,897 blocks
+- **At t-gmax (Peak Memory)**: 141.7 MB in 601,863 blocks
+- **At t-end (Live Memory)**: 121.4 MB in 325,394 blocks
 
-- **Batch Insert (1000 items)**:
-  - Throughput: **10.190 Million elements/s**
-  - Time: **98.132 µs** (for 1000 items)
-  - Change: **+393.13% throughput** (Performance has radically improved)
-  - *Note: Latency per inserted item is now under 100 ns, down from the 1.95 ms physical SSD barrier.*
+### Analysis
 
-## 4. Operational Overhead & Allocations
-- **ColumnArray String Allocation (1000 items)**: 
-  - Time: **40.015 µs**
-  - Stable allocation overhead.
-- **u32 Scan Efficiency**:
-  - Throughput: **243.45 KiB/s** per cache line validation.
+The significant difference between Total Allocated and t-end indicates the Wait-Free RCU pointer swapping mechanism is actively churning through cloned `Vec` blocks during batch writes. Although our new optimizations use `const N` backing arrays for `SimpleBloom`, the core `ColumnArray` instances still duplicate `Vec`s to achieve stable snapshots for concurrent readers. 
 
----
-**Architectural Conclusion:**
-The system is now a mathematically sound, completely Mutex-free, Wait-Free architecture. The combination of RCU QSBR for reads and Async WAL for writes has unlocked multi-million QPS with sub-40ns latency.
+In extremely constrained `#![no_std]` targets, the future roadmap includes converting `ColumnArray` to a static, double-buffered `[Option<T>; N]` structure to further reduce heap usage to near zero.
+
+## Flamegraph / CPU Profiling
+
+*(Flamegraph profile prepared in `benches/profiling.rs`. Execute `cargo flamegraph --bench profiling` to visualize the CPU trace of the hot paths when installed.)*

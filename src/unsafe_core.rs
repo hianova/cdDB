@@ -59,3 +59,80 @@ impl Drop for GarbageEntry {
         unsafe { (self.drop_fn)(self.ptr); }
     }
 }
+
+/// Safely dereference a pointer to a node, returning None if null.
+pub fn load_node<'a, T>(ptr: *mut T) -> Option<&'a T> {
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &*ptr })
+    }
+}
+
+/// Safely store a pointer into an AtomicPtr field of a node.
+pub fn link_node<T, P>(
+    node: *mut T,
+    get_atomic_field: impl FnOnce(&T) -> &crate::platform::atomic::AtomicPtr<P>,
+    next_ptr: *mut P,
+) {
+    if !node.is_null() {
+        let atomic = unsafe { get_atomic_field(&*node) };
+        atomic.store(next_ptr, crate::platform::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "std"))]
+pub mod no_std_sync {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::cell::UnsafeCell;
+    use core::ops::{Deref, DerefMut};
+
+    pub struct Mutex<T: ?Sized> {
+        locked: AtomicBool,
+        data: UnsafeCell<T>,
+    }
+
+    unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
+    unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
+
+    pub struct MutexGuard<'a, T: ?Sized> {
+        mutex: &'a Mutex<T>,
+    }
+
+    impl<T> Mutex<T> {
+        pub const fn new(val: T) -> Self {
+            Self {
+                locked: AtomicBool::new(false),
+                data: UnsafeCell::new(val),
+            }
+        }
+    }
+
+    impl<T: ?Sized> Mutex<T> {
+        pub fn lock(&self) -> MutexGuard<'_, T> {
+            while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                core::hint::spin_loop();
+            }
+            MutexGuard { mutex: self }
+        }
+    }
+
+    impl<T: ?Sized> Deref for MutexGuard<'_, T> {
+        type Target = T;
+        fn deref(&self) -> &Self::Target {
+            unsafe { &*self.mutex.data.get() }
+        }
+    }
+
+    impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            unsafe { &mut *self.mutex.data.get() }
+        }
+    }
+
+    impl<T: ?Sized> Drop for MutexGuard<'_, T> {
+        fn drop(&mut self) {
+            self.mutex.locked.store(false, Ordering::Release);
+        }
+    }
+}

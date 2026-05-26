@@ -21,7 +21,7 @@ use crate::partition::Partition;
 use crate::qsbr::{WorkerState, WorkerNode};
 use crate::storage::Storage;
 use crate::unsafe_core::new_atomic_ptr;
-use crate::platform::{FileSystem, ThreadManager};
+use crate::platform::{FileSystem, Executor};
 use crate::wal::{WalProvider, NoopWal};
 #[cfg(feature = "std")]
 use crate::wal::StdWal;
@@ -29,26 +29,26 @@ use crate::wal::StdWal;
 use crate::commands::{PartitionCommand, WriteCommand};
 
 /// 4. cdDB 全域入口與調度器 (Dispatcher)
-pub struct CdDBDispatcher {
-    pub route_table: AHashMap<String, PartitionRoute>,
+pub struct CdDBDispatcher<const N: usize> {
+    pub route_table: AHashMap<String, Arc<PartitionRoute<N>>>,
     pub base_path: Option<String>,
     pub workers: Arc<AtomicPtr<WorkerNode>>,
     pub fs: Arc<dyn FileSystem>,
-    pub thread_manager: Arc<dyn ThreadManager>,
+    pub executor: Arc<dyn Executor>,
 }
 
-impl CdDBDispatcher {
+impl<const N: usize> CdDBDispatcher<N> {
     pub fn new(
         base_path: Option<String>,
         fs: Arc<dyn FileSystem>,
-        thread_manager: Arc<dyn ThreadManager>,
+        executor: Arc<dyn Executor>,
     ) -> Self {
         Self {
             route_table: AHashMap::default(),
             base_path,
             workers: Arc::new(crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut())),
             fs,
-            thread_manager,
+            executor,
         }
     }
 
@@ -57,7 +57,7 @@ impl CdDBDispatcher {
         Self::new(
             base_path,
             Arc::new(crate::platform::StdFileSystem),
-            Arc::new(crate::platform::StdThreadManager),
+            Arc::new(crate::platform::StdExecutor),
         )
     }
 
@@ -99,18 +99,19 @@ impl CdDBDispatcher {
         let (tx, rx) = std::sync::mpsc::sync_channel(10000);
         let writer_tx_out = tx.clone();
         
-        let (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers) = self.init_partition_state(&path);
+        let (storage_path, shared_pointers, bloom, columns, hot_index, workers) = self.init_partition_state(&path);
         
-        let route = PartitionRoute {
+        let route = Arc::new(PartitionRoute {
+            name: path.clone(),
             writer_tx: tx,
             columns: Arc::clone(&columns),
             shared_pointers: Arc::clone(&shared_pointers),
             hot_index: Arc::clone(&hot_index),
-            bloom_filter: Arc::clone(&bloom_filter),
+            bloom_filter: Arc::clone(&bloom),
             storage: Arc::new(Storage::new(storage_path.clone(), self.fs.clone())),
             workers: Arc::clone(&workers),
             wal: Arc::clone(&wal),
-        };
+        });
         
         self.route_table.insert(path.clone(), route);
  
@@ -121,7 +122,7 @@ impl CdDBDispatcher {
             workers,
             storage_path,
             shared_pointers,
-            bloom_filter,
+            bloom,
         );
  
         UserWriter(writer_tx_out)
@@ -134,25 +135,26 @@ impl CdDBDispatcher {
         writer_tx: Arc<dyn crate::platform::MessageSender>,
         _writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
     ) {
-        let (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers) = self.init_partition_state(&path);
+        let (storage_path, shared_pointers, bloom, columns, hot_index, workers) = self.init_partition_state(&path);
         
-        let route = PartitionRoute {
+        let route = Arc::new(PartitionRoute {
+            name: path.clone(),
             writer_tx,
             columns: Arc::clone(&columns),
             shared_pointers: Arc::clone(&shared_pointers),
             hot_index: Arc::clone(&hot_index),
-            bloom_filter: Arc::clone(&bloom_filter),
+            bloom_filter: Arc::clone(&bloom),
             storage: Arc::new(Storage::new(storage_path.clone(), self.fs.clone())),
             workers: Arc::clone(&workers),
             wal: Arc::new(NoopWal),
-        };
+        });
         
         self.route_table.insert(path, route);
         
         // In no_std, the user must manage the thread/loop for the Partition
     }
 
-    fn init_partition_state(&self, path: &str) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<AtomicPtr<SimpleBloom>>, Arc<AtomicPtr<Columns>>, Arc<DualCacheFF<usize, ()>>, Arc<AtomicPtr<WorkerNode>>) {
+    fn init_partition_state(&self, path: &str) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<AtomicPtr<SimpleBloom<N>>>, Arc<AtomicPtr<Columns<N>>>, Arc<DualCacheFF<usize, ()>>, Arc<AtomicPtr<WorkerNode>>) {
         let storage_path = self
             .base_path
             .as_ref()
@@ -162,29 +164,29 @@ impl CdDBDispatcher {
         let _ = self.fs.create_dir_all(&storage_path);
 
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
-        let bloom_filter = Arc::new(new_atomic_ptr(SimpleBloom::new(1024 * 1024)));
-        let columns = Arc::new(new_atomic_ptr(Columns::new()));
+        let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<N>::new()));
+        let columns = Arc::new(new_atomic_ptr(Columns::<N>::new()));
         let hot_index = Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60)));
         let workers = Arc::new(crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut()));
         
-        (storage_path, shared_pointers, bloom_filter, columns, hot_index, workers)
+        (storage_path, shared_pointers, bloom, columns, hot_index, workers)
     }
 
     #[cfg(feature = "std")]
     fn spawn_partition_thread(
         &self,
         rx: std::sync::mpsc::Receiver<PartitionCommand>,
-        columns: Arc<AtomicPtr<Columns>>,
+        columns: Arc<AtomicPtr<Columns<N>>>,
         wal: Arc<dyn WalProvider>,
         workers: Arc<AtomicPtr<WorkerNode>>,
         storage_path: String,
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
-        bloom_filter: Arc<AtomicPtr<SimpleBloom>>,
+        bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
     ) {
         let fs_rt = self.fs.clone();
         let wal_rt = wal.clone();
         
-        self.thread_manager.spawn(alloc::boxed::Box::new(move || {
+        self.executor.spawn_task(alloc::boxed::Box::new(move || {
             let mut partition = Partition::new(
                 alloc::boxed::Box::new(crate::platform::StdMessageQueue { rx: Mutex::new(rx) }),
                 columns,
@@ -201,8 +203,8 @@ impl CdDBDispatcher {
         }));
     }
 
-    pub fn get_route(&self, path: &str) -> Option<&PartitionRoute> {
-        self.route_table.get(path)
+    pub fn get_route(&self, partition_name: &str) -> Option<Arc<PartitionRoute<N>>> {
+        self.route_table.get(partition_name).cloned()
     }
 
     /// Execute a batch of query nodes against a named partition under a single
@@ -229,7 +231,7 @@ impl CdDBDispatcher {
 }
 
 #[cfg(feature = "std")]
-impl Default for CdDBDispatcher {
+impl<const N: usize> Default for CdDBDispatcher<N> {
     fn default() -> Self {
         Self::new_std(None)
     }
@@ -245,21 +247,22 @@ impl UserWriter {
 }
 
 #[derive(Clone)]
-pub struct PartitionRoute {
+pub struct PartitionRoute<const N: usize> {
+    pub name: String,
     #[cfg(feature = "std")]
     pub writer_tx: SyncSender<PartitionCommand>,
     #[cfg(not(feature = "std"))]
     pub writer_tx: Arc<dyn crate::platform::MessageSender>,
-    pub columns: Arc<AtomicPtr<Columns>>,
+    pub columns: Arc<AtomicPtr<Columns<N>>>,
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
     pub hot_index: Arc<DualCacheFF<usize, ()>>,
-    pub bloom_filter: Arc<AtomicPtr<SimpleBloom>>,
+    pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
     pub storage: Arc<Storage>,
     pub workers: Arc<AtomicPtr<WorkerNode>>,
     pub wal: Arc<dyn WalProvider>,
 }
 
-impl PartitionRoute {
+impl<const N: usize> PartitionRoute<N> {
     pub fn get_snapshot(&self) -> AHashMap<usize, MultiVectorPointer> {
         crate::unsafe_core::load_clone(&self.shared_pointers)
     }
@@ -272,7 +275,7 @@ impl PartitionRoute {
         }));
         loop {
             let head = self.workers.load(crate::platform::atomic::Ordering::Acquire);
-            unsafe { (*new_node).next.store(head, crate::platform::atomic::Ordering::Relaxed); }
+            crate::unsafe_core::link_node(new_node, |n| &n.next, head);
             if self.workers.compare_exchange(
                 head,
                 new_node,
@@ -297,7 +300,7 @@ impl PartitionRoute {
         &self,
         name: &str,
         _worker: &WorkerState,
-    ) -> Option<Arc<ColumnArray<String>>> {
+    ) -> Option<Arc<ColumnArray<String, N>>> {
         let cols = crate::unsafe_core::load_ref(&self.columns);
         cols.str_cols.get(name).cloned()
     }
@@ -309,7 +312,7 @@ impl PartitionRoute {
         &self,
         name: &str,
         _worker: &WorkerState,
-    ) -> Option<Arc<ColumnArray<u32>>> {
+    ) -> Option<Arc<ColumnArray<u32, N>>> {
         let cols = crate::unsafe_core::load_ref(&self.columns);
         cols.int_cols.get(name).cloned()
     }
@@ -321,7 +324,7 @@ impl PartitionRoute {
         &self,
         name: &str,
         _worker: &WorkerState,
-    ) -> Option<Arc<ColumnArray<Vec<u8>>>> {
+    ) -> Option<Arc<ColumnArray<Vec<u8>, N>>> {
         let cols = crate::unsafe_core::load_ref(&self.columns);
         cols.blob_cols.get(name).cloned()
     }

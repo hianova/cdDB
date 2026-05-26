@@ -40,7 +40,7 @@ fn main() {
 
     // 4. Query the ingested data
     if let Some(route) = db.get_route("system.metrics") {
-        let query = Query::new(route);
+        let query = Query::new(&route);
         println!("\nQuerying back Ops data for Entity 1001:");
         
         if let Some(service) = query.get_str(1001, "service") {

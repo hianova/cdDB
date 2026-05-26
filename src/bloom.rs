@@ -1,26 +1,22 @@
 use core::hash::Hash;
 use ahash::RandomState;
-use alloc::vec::Vec;
+
 use crate::platform::atomic::{AtomicUsize, Ordering};
 
 const BITS_PER_WORD: usize = core::mem::size_of::<usize>() * 8;
 
-pub struct SimpleBloom {
-    bits: Vec<AtomicUsize>,
-    num_bits: usize,
+pub struct SimpleBloom<const N: usize> {
+    bits: [AtomicUsize; N],
     hash_builder: RandomState,
 }
 
-impl SimpleBloom {
-    pub fn new(num_bits: usize) -> Self {
-        let num_words = (num_bits + BITS_PER_WORD - 1) / BITS_PER_WORD;
-        let mut bits = Vec::with_capacity(num_words);
-        for _ in 0..num_words {
-            bits.push(AtomicUsize::new(0));
-        }
+impl<const N: usize> SimpleBloom<N> {
+    const BITS_PER_WORD: usize = core::mem::size_of::<usize>() * 8;
+    const NUM_BITS: usize = N * Self::BITS_PER_WORD;
+
+    pub fn new() -> Self {
         Self {
-            bits,
-            num_bits: num_words * BITS_PER_WORD,
+            bits: core::array::from_fn(|_| AtomicUsize::new(0)),
             hash_builder: RandomState::new(),
         }
     }
@@ -32,8 +28,8 @@ impl SimpleBloom {
 
         for i in 0..4u32 {
             let combined_hash = h1.wrapping_add(i.wrapping_mul(h2)) as usize;
-            let bit_idx = combined_hash % self.num_bits;
-            self.bits[bit_idx / BITS_PER_WORD].fetch_or(1 << (bit_idx % BITS_PER_WORD), Ordering::Relaxed);
+            let bit_idx = combined_hash % Self::NUM_BITS;
+            self.bits[bit_idx / Self::BITS_PER_WORD].fetch_or(1 << (bit_idx % Self::BITS_PER_WORD), Ordering::Relaxed);
         }
     }
 
@@ -44,8 +40,8 @@ impl SimpleBloom {
 
         for i in 0..4u32 {
             let combined_hash = h1.wrapping_add(i.wrapping_mul(h2)) as usize;
-            let bit_idx = combined_hash % self.num_bits;
-            if (self.bits[bit_idx / BITS_PER_WORD].load(Ordering::Relaxed) & (1 << (bit_idx % BITS_PER_WORD))) == 0 {
+            let bit_idx = combined_hash % Self::NUM_BITS;
+            if (self.bits[bit_idx / Self::BITS_PER_WORD].load(Ordering::Relaxed) & (1 << (bit_idx % Self::BITS_PER_WORD))) == 0 {
                 return false;
             }
         }

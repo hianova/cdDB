@@ -47,12 +47,12 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
-mod platform;
-mod qsbr;
+pub mod platform;
+pub mod qsbr;
 mod storage;
 mod unsafe_core;
 mod column;
-mod commands;
+pub mod commands;
 mod partition;
 mod query;
 mod dispatcher;

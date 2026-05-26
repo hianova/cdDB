@@ -70,8 +70,7 @@ impl QsbrManager {
         let mut min_epoch = current_global;
 
         let mut curr_ptr = self.workers.load(Ordering::Acquire);
-        while !curr_ptr.is_null() {
-            let node = unsafe { &*curr_ptr };
+        while let Some(node) = crate::unsafe_core::load_node(curr_ptr) {
             let epoch = node.worker.local_epoch.load(Ordering::Acquire);
             if epoch != 0 && epoch < min_epoch {
                 min_epoch = epoch;

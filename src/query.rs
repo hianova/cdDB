@@ -67,23 +67,23 @@ pub enum QueryResult {
     None,
 }
 
-pub struct Query<'a> {
-    route: &'a PartitionRoute,
+pub struct Query<'a, const N: usize> {
+    route: &'a PartitionRoute<N>,
     worker: Arc<WorkerState>,
 }
 
-pub struct QuerySession<'a> {
-    route: &'a PartitionRoute,
+pub struct QuerySession<'a, const N: usize> {
+    route: &'a PartitionRoute<N>,
     worker: &'a WorkerState,
 }
 
-impl<'a> Query<'a> {
-    pub fn new(route: &'a PartitionRoute) -> Self {
+impl<'a, const N: usize> Query<'a, N> {
+    pub fn new(route: &'a PartitionRoute<N>) -> Self {
         let worker = route.register_worker();
         Self { route, worker }
     }
 
-    pub fn session(&self) -> QuerySession<'_> {
+    pub fn session(&self) -> QuerySession<'_, N> {
         QuerySession::new(self.route, &self.worker)
     }
 
@@ -114,8 +114,8 @@ impl<'a> Query<'a> {
     }
 }
 
-impl<'a> QuerySession<'a> {
-    pub fn new(route: &'a PartitionRoute, worker: &'a WorkerState) -> Self {
+impl<'a, const N: usize> QuerySession<'a, N> {
+    pub fn new(route: &'a PartitionRoute<N>, worker: &'a WorkerState) -> Self {
         worker.enter();
         Self { route, worker }
     }
@@ -346,13 +346,13 @@ impl<'a> QuerySession<'a> {
     }
 }
 
-impl<'a> Drop for QuerySession<'a> {
+impl<'a, const N: usize> Drop for QuerySession<'a, N> {
     fn drop(&mut self) {
         self.worker.leave();
     }
 }
 
-impl<'a> Query<'a> {
+impl<'a, const N: usize> Query<'a, N> {
     pub fn seed_bloom_filter(&self, entity_id: usize) {
         let bloom = crate::unsafe_core::load_ref(&self.route.bloom_filter);
         bloom.insert(&entity_id);

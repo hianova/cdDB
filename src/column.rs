@@ -6,15 +6,14 @@ use crate::platform::atomic::{AtomicBool, AtomicPtr, Ordering};
 use crate::unsafe_core::{load_clone, load_ref, new_atomic_ptr};
 use crate::qsbr::WorkerState;
 
-/// 0. 核心列集合 (Columns Snapshot)
 #[derive(Clone)]
-pub struct Columns {
-    pub str_cols: AHashMap<String, Arc<ColumnArray<String>>>,
-    pub int_cols: AHashMap<String, Arc<ColumnArray<u32>>>,
-    pub blob_cols: AHashMap<String, Arc<ColumnArray<Vec<u8>>>>,
+pub struct Columns<const N: usize> {
+    pub str_cols: AHashMap<String, Arc<ColumnArray<String, N>>>,
+    pub int_cols: AHashMap<String, Arc<ColumnArray<u32, N>>>,
+    pub blob_cols: AHashMap<String, Arc<ColumnArray<Vec<u8>, N>>>,
 }
 
-impl Columns {
+impl<const N: usize> Columns<N> {
     pub fn new() -> Self {
         Self {
             str_cols: AHashMap::default(),
@@ -27,13 +26,13 @@ impl Columns {
 /// 1. 最底層的連續資料陣列 (Column / DOD 結構)
 ///
 /// 使用自定義 QSBR 實現 Wait-Free 讀取
-pub struct ColumnArray<T> {
+pub struct ColumnArray<T, const N: usize> {
     pub data: AtomicPtr<Vec<Option<T>>>,
     pub waitlist: AtomicPtr<Vec<usize>>,
     pub(crate) write_guard: AtomicBool,
 }
 
-impl<T> ColumnArray<T> {
+impl<T, const N: usize> ColumnArray<T, N> {
     pub fn new() -> Self {
         Self {
             data: new_atomic_ptr(Vec::new()),
@@ -141,7 +140,7 @@ impl<T> ColumnArray<T> {
     }
 }
 
-impl<T> Default for ColumnArray<T> {
+impl<T, const N: usize> Default for ColumnArray<T, N> {
     fn default() -> Self {
         Self::new()
     }

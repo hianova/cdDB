@@ -1,61 +1,5 @@
 #[cfg(not(feature = "std"))]
-mod no_std_sync {
-    use core::sync::atomic::{AtomicBool, Ordering};
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
-
-    pub struct Mutex<T: ?Sized> {
-        locked: AtomicBool,
-        data: UnsafeCell<T>,
-    }
-
-    unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
-    unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
-
-    pub struct MutexGuard<'a, T: ?Sized> {
-        mutex: &'a Mutex<T>,
-    }
-
-    impl<T> Mutex<T> {
-        pub const fn new(val: T) -> Self {
-            Self {
-                locked: AtomicBool::new(false),
-                data: UnsafeCell::new(val),
-            }
-        }
-    }
-
-    impl<T: ?Sized> Mutex<T> {
-        pub fn lock(&self) -> MutexGuard<'_, T> {
-            while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-                core::hint::spin_loop();
-            }
-            MutexGuard { mutex: self }
-        }
-    }
-
-    impl<T: ?Sized> Deref for MutexGuard<'_, T> {
-        type Target = T;
-        fn deref(&self) -> &Self::Target {
-            unsafe { &*self.mutex.data.get() }
-        }
-    }
-
-    impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
-        fn deref_mut(&mut self) -> &mut Self::Target {
-            unsafe { &mut *self.mutex.data.get() }
-        }
-    }
-
-    impl<T: ?Sized> Drop for MutexGuard<'_, T> {
-        fn drop(&mut self) {
-            self.mutex.locked.store(false, Ordering::Release);
-        }
-    }
-}
-
-#[cfg(not(feature = "std"))]
-pub use no_std_sync::Mutex;
+pub use crate::unsafe_core::no_std_sync::Mutex;
 
 #[cfg(feature = "std")]
 pub use std::sync::Mutex;
@@ -101,8 +45,8 @@ pub trait FileSystem: Send + Sync {
     }
 }
 
-pub trait ThreadManager: Send + Sync {
-    fn spawn(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>);
+pub trait Executor: Send + Sync {
+    fn spawn_task(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>);
 }
 
 #[cfg(feature = "std")]
@@ -157,7 +101,7 @@ impl FileSystem for StdFileSystem {
 }
 
 #[cfg(feature = "std")]
-pub struct StdThreadManager;
+pub struct StdExecutor;
 pub trait MessageQueue: Send + Sync {
     fn recv(&self) -> Result<crate::commands::PartitionCommand, String>;
     fn try_recv(&self) -> Result<crate::commands::PartitionCommand, String>;
@@ -179,10 +123,19 @@ impl MessageQueue for StdMessageQueue {
 }
 
 #[cfg(feature = "std")]
-impl ThreadManager for StdThreadManager {
-    fn spawn(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>) {
+impl Executor for StdExecutor {
+    fn spawn_task(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>) {
         std::thread::spawn(move || f());
     }
+}
+
+/// Pluggable Thread-Local Storage (TLS) abstraction for `no_std` environments.
+pub trait ThreadLocalProvider<T>: Send + Sync {
+    fn with<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(Option<&T>) -> R;
+    
+    fn set(&self, val: T);
 }
 
 #[allow(dead_code)]

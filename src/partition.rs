@@ -27,8 +27,8 @@ pub struct MultiVectorPointer {
 }
 
 /// 3. 分區/群組 (Partition / Group)
-pub struct Partition {
-    pub columns: Arc<AtomicPtr<Columns>>,
+pub struct Partition<const N: usize> {
+    pub columns: Arc<AtomicPtr<Columns<N>>>,
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
     pub writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
     pub qsbr: QsbrManager,
@@ -36,7 +36,7 @@ pub struct Partition {
     // 持久層與快照
     pub storage: Arc<Storage>,
     pub hot_index: DualCacheFF<usize, ()>, // Just for heat tracking
-    pub bloom_filter: Arc<AtomicPtr<SimpleBloom>>,
+    pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
 
     // WAL 支援
     pub wal: Arc<dyn WalProvider>,
@@ -45,16 +45,16 @@ pub struct Partition {
     pub fs: Arc<dyn FileSystem>,
 }
 
-impl Partition {
+impl<const N: usize> Partition<N> {
     pub fn new(
         writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
-        columns: Arc<AtomicPtr<Columns>>,
+        columns: Arc<AtomicPtr<Columns<N>>>,
         wal: Arc<dyn WalProvider>,
         workers: Arc<AtomicPtr<WorkerNode>>,
         storage_path: String,
         fs: Arc<dyn FileSystem>,
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
-        bloom_filter: Arc<AtomicPtr<SimpleBloom>>,
+        bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
     ) -> Self {
         let storage = Arc::new(Storage::new(storage_path, fs.clone()));
         let bloom_bits = 1024 * 1024;
@@ -89,7 +89,7 @@ impl Partition {
     fn rebuild_bloom_filter(&mut self) {
         let _old_bits = self.bloom_bits;
         self.bloom_bits *= 2;
-        let new_bloom = SimpleBloom::new(self.bloom_bits);
+        let new_bloom = SimpleBloom::<N>::new();
         let mut count = 0;
 
         {
@@ -304,7 +304,7 @@ impl Partition {
         }
     }
 
-    fn get_or_create_column_str(&mut self, name: &str) -> Arc<crate::column::ColumnArray<String>> {
+    fn get_or_create_column_str(&mut self, name: &str) -> Arc<crate::column::ColumnArray<String, N>> {
         let cols = crate::unsafe_core::load_ref(&self.columns);
         if let Some(col) = cols.str_cols.get(name) {
             col.clone()
@@ -318,7 +318,7 @@ impl Partition {
         }
     }
 
-    fn get_or_create_column_int(&mut self, name: &str) -> Arc<crate::column::ColumnArray<u32>> {
+    fn get_or_create_column_int(&mut self, name: &str) -> Arc<crate::column::ColumnArray<u32, N>> {
         let cols = crate::unsafe_core::load_ref(&self.columns);
         if let Some(col) = cols.int_cols.get(name) {
             col.clone()
@@ -332,7 +332,7 @@ impl Partition {
         }
     }
 
-    fn get_or_create_column_blob(&mut self, name: &str) -> Arc<crate::column::ColumnArray<Vec<u8>>> {
+    fn get_or_create_column_blob(&mut self, name: &str) -> Arc<crate::column::ColumnArray<Vec<u8>, N>> {
         let cols = crate::unsafe_core::load_ref(&self.columns);
         if let Some(col) = cols.blob_cols.get(name) {
             col.clone()
@@ -346,7 +346,7 @@ impl Partition {
         }
     }
 
-    fn insert_into_column<T: Clone>(&mut self, col: &crate::column::ColumnArray<T>, val: T) -> usize {
+    fn insert_into_column<T: Clone>(&mut self, col: &crate::column::ColumnArray<T, N>, val: T) -> usize {
         let mut wl = load_clone(&col.waitlist);
         let mut data = load_clone(&col.data);
 

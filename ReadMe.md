@@ -31,7 +31,7 @@ Add `cdDB` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cdDB = "0.2.4"
+cdDB = "0.3.0"
 ```
 
 ### Basic Usage (Synchronous)
@@ -41,7 +41,7 @@ use cdDB::{CdDBDispatcher, WriteCommand, Query, Attributes};
 
 fn main() {
     // Initialize the dispatcher with a base path for persistence
-    let mut db = CdDBDispatcher::new_std(Some("data_dir".into()));
+    let mut db = CdDBDispatcher::<1048576>::new_std(Some("data_dir".into()));
     
     // Register a partition (spawns a native worker thread)
     let tx = db.register_partition("users.active".to_string());
@@ -58,7 +58,7 @@ fn main() {
     }).unwrap();
 
     // Query data (wait-free RCU read)
-    let query = Query::new(route);
+    let query = Query::new(&route);
     if let Some(score) = query.get_int(1, "score") {
         println!("User score: {}", score);
     }
