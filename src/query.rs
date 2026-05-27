@@ -338,6 +338,25 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         None
     }
 
+    /// Optimized: Fetch payload, epoch, and record_type in a single atomic RCU lookup
+    pub fn get_signed_record(&self, entity_id: usize) -> Option<(Vec<u8>, u32, u32)> {
+        if let Some(ptr) = self.get_pointer(entity_id) {
+            let payload_idx = ptr.attribute_indices.get("payload")?;
+            let epoch_idx = ptr.attribute_indices.get("epoch")?;
+            let type_idx = ptr.attribute_indices.get("type")?;
+            
+            let payload = self.route.get_column_blob("payload", &self.worker)?
+                .get_element_pinned(*payload_idx)?;
+            let epoch = self.route.get_column_int("epoch", &self.worker)?
+                .get_element_pinned(*epoch_idx)?;
+            let record_type = self.route.get_column_int("type", &self.worker)?
+                .get_element_pinned(*type_idx)?;
+                
+            return Some((payload, epoch, record_type));
+        }
+        None
+    }
+
     /// Item 3: Safe Snapshot Iterator
     pub fn entities_iter(&self) -> impl Iterator<Item = usize> {
         let snap = load_ref(&self.route.shared_pointers);
