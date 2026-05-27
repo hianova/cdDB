@@ -50,7 +50,7 @@ extern crate std;
 pub mod platform;
 pub mod qsbr;
 mod storage;
-mod unsafe_core;
+pub mod unsafe_core;
 mod column;
 pub mod commands;
 mod partition;
