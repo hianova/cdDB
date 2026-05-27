@@ -39,6 +39,8 @@ pub struct StdWal {
     pub writer: Arc<crate::platform::Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     #[cfg(feature = "std")]
     pub async_buffer: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    #[cfg(feature = "std")]
+    pub condvar: Arc<std::sync::Condvar>,
 }
 
 impl StdWal {
@@ -56,21 +58,43 @@ impl StdWal {
             
             let writer = Arc::new(crate::platform::Mutex::new(file_opt));
             let async_buffer = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::with_capacity(10000)));
+            let condvar = Arc::new(std::sync::Condvar::new());
 
             if mode == WalMode::Async100ms {
                 let bg_writer = Arc::clone(&writer);
                 let bg_buffer = Arc::clone(&async_buffer);
+                let bg_condvar = Arc::clone(&condvar);
                 std::thread::spawn(move || {
+                    let mut last_fsync = std::time::Instant::now();
                     loop {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
                         let mut local_buf = Vec::<Vec<u8>>::new();
                         {
                             let mut lock = bg_buffer.lock().unwrap();
-                            if !lock.is_empty() {
-                                core::mem::swap(&mut local_buf, &mut *lock);
+                            while lock.is_empty() {
+                                lock = bg_condvar.wait(lock).unwrap();
                             }
+                            core::mem::swap(&mut local_buf, &mut *lock);
                         }
                         if !local_buf.is_empty() {
+                            // Adaptive Group Commit:
+                            // Under low load, write and fsync immediately (minimal latency).
+                            // Under high load (i.e. fsync rate would exceed 1000/sec), we sleep for the remaining part of 1ms.
+                            // This aggregates hundreds/thousands of transactions into a single fsync.
+                            let elapsed = last_fsync.elapsed();
+                            let target_interval = std::time::Duration::from_millis(1);
+                            if elapsed < target_interval {
+                                std::thread::sleep(target_interval - elapsed);
+                                // After sleep, check if more items arrived to batch them
+                                {
+                                    let mut lock = bg_buffer.lock().unwrap();
+                                    if !lock.is_empty() {
+                                        let mut extra_buf = Vec::<Vec<u8>>::new();
+                                        core::mem::swap(&mut extra_buf, &mut *lock);
+                                        local_buf.extend(extra_buf);
+                                    }
+                                }
+                            }
+                            
                             let mut w_lock = bg_writer.lock().unwrap();
                             if let Some(w) = w_lock.as_mut() {
                                 use std::io::Write;
@@ -79,6 +103,7 @@ impl StdWal {
                                 }
                                 let _ = w.flush();
                                 let _ = w.get_ref().sync_all();
+                                last_fsync = std::time::Instant::now();
                             }
                         }
                     }
@@ -91,6 +116,7 @@ impl StdWal {
                 mode,
                 writer,
                 async_buffer,
+                condvar,
             }
         }
         #[cfg(not(feature = "std"))]
@@ -110,6 +136,7 @@ impl WalProvider for StdWal {
             if self.mode == WalMode::Async100ms {
                 let mut lock = self.async_buffer.lock().unwrap();
                 lock.push(buf);
+                self.condvar.notify_one();
                 return Ok(());
             }
 
@@ -138,6 +165,7 @@ impl WalProvider for StdWal {
                 if self.mode == WalMode::Async100ms {
                     let mut lock = self.async_buffer.lock().unwrap();
                     lock.push(buf);
+                    self.condvar.notify_one();
                     return Ok(());
                 }
 

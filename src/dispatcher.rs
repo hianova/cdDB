@@ -96,7 +96,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         path: String,
         wal: Arc<dyn WalProvider>,
     ) -> UserWriter {
-        let (tx, rx) = std::sync::mpsc::sync_channel(10000);
+        let (tx, rx) = std::sync::mpsc::sync_channel(262144);
         let writer_tx_out = tx.clone();
         
         let (storage_path, shared_pointers, bloom, columns, hot_index, workers) = self.init_partition_state(&path);

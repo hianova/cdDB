@@ -8,7 +8,7 @@ use std::thread;
 fn test_olap_vectorized_queries() {
     println!("\n=== cdDB OLAP Vectorized Queries Test ===");
 
-    let mut db = CdDBDispatcher::new_std(None);
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("olap.test".to_string());
 
     // 1. Insert some data
@@ -30,7 +30,7 @@ fn test_olap_vectorized_queries() {
         thread::sleep(Duration::from_millis(10));
     }
 
-    let query_engine = Query::new(route);
+    let query_engine = Query::new(&route);
 
     // 2. Test Scan
     println!("Testing Scan...");

@@ -74,7 +74,7 @@ pub use dispatcher::UserWriter;
 pub use qsbr::{QsbrManager, WorkerState};
 pub use storage::{Storage, EntityData};
 pub use ops::{ITOpsRecord, LogLevel, ITOpsIngest};
-pub use wal::{WalProvider, StdWal, NoopWal};
+pub use wal::{WalProvider, StdWal, NoopWal, WalMode};
 pub use platform::FileSystem;
 
 #[cfg(feature = "dualcache-ff")]
