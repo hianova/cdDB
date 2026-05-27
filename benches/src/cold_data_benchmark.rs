@@ -17,7 +17,7 @@ fn test_cold_data_scan_performance() {
     
     // 1. Initial Ingestion
     {
-        let mut db = CdDBDispatcher::new_std(Some(base_path.to_string_lossy().to_string()));
+        let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(base_path.to_string_lossy().to_string()));
         let tx = db.register_partition("cold.bench".to_string());
         
         let mut batch = Vec::with_capacity(count);
@@ -36,11 +36,11 @@ fn test_cold_data_scan_performance() {
     
     // 2. Cold Start & Scan
     // We recreate the DB and register the same partition
-    let mut db = CdDBDispatcher::new_std(Some(base_path.to_string_lossy().to_string()));
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(base_path.to_string_lossy().to_string()));
     let _tx = db.register_partition("cold.bench".to_string());
     
     let route = db.get_route("cold.bench").unwrap();
-    let query = Query::new(route);
+    let query = Query::new(&route);
     
     // Seed bloom filter so Query knows entities exist
     for i in start_idx..start_idx + scan_size {

@@ -3,7 +3,7 @@ use criterion::{criterion_group, criterion_main, Criterion, Throughput, black_bo
 use std::thread;
 
 fn throughput_benchmark(c: &mut Criterion) {
-    let mut db = CdDBDispatcher::new_std(None);
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("bench.throughput".to_string());
     
     // Preload 100k entities for read benchmark

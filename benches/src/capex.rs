@@ -6,7 +6,7 @@ fn capex_benchmark(c: &mut Criterion) {
     // CAPEX here likely stands for "Capital Expenditure" efficiency: 
     // performance gained per resource unit.
     
-    let mut db = CdDBDispatcher::new_std(None);
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("bench.capex".to_string());
     
     let count = 50_000;
@@ -24,7 +24,7 @@ fn capex_benchmark(c: &mut Criterion) {
         thread::sleep(std::time::Duration::from_millis(10));
     }
 
-    let query_engine = Query::new(route);
+    let query_engine = Query::new(&route);
 
     let mut group = c.benchmark_group("Efficiency Index (Throughput/Resource)");
     group.throughput(Throughput::Bytes(4)); // u32 size

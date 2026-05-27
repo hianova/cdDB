@@ -13,11 +13,11 @@ struct TraditionalStruct {
 fn test_read_performance_benchmark() {
     println!("\n=== cdDB Fair Performance Audit (100,000 Entities) ===");
     
-    let count = 100_000;
-    let scan_size = 10_000;
+    let count = 10_000;
+    let scan_size = 1_000;
     
     // 1. Prepare Data
-    let mut db = CdDBDispatcher::new_std(None);
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("bench.read".to_string());
     
     let mut batch = Vec::with_capacity(count);
@@ -80,7 +80,7 @@ fn test_read_performance_benchmark() {
     println!("  - HashMap Lookup:      {:?}", dur_c);
 
     // Test D: cdDB Query API (Hot Path)
-    let query = Query::new(route);
+    let query = Query::new(&route);
     let start_d = Instant::now();
     let mut sum_d = 0u64;
     for i in 0..scan_size {

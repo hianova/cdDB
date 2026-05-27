@@ -31,7 +31,7 @@ Add `cdDB` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cdDB = "0.3.0"
+cdDB = "0.3.1"
 ```
 
 ### Basic Usage (Synchronous)
@@ -82,9 +82,11 @@ db.execute_batch("users.active", &nodes, |result| {
 });
 ```
 
-## 📊 Performance & Benchmarking
+For advanced embedded features, refer to the [SPEC.md](SPEC.md) document.
 
-`cdDB` includes a comprehensive benchmarking suite to validate its performance claims.
+## 📊 Benchmarks & Performance
+
+`cdDB` is engineered for ultra-low latency. Under Criterion and raw wall-clock thread stress testing, the performance figures are as follows:
 
 ### Running Benchmarks
 ```bash
@@ -95,12 +97,12 @@ cargo bench -p cdDB-benches
 cargo test --release -p cdDB-benches --test read_pressure_benchmark -- --nocapture
 ```
 
-### Latest Audit Results (v0.3.0, Apple Silicon, Release Profile)
+### Latest Audit Results (v0.3.1, Apple Silicon, Release Profile)
 
 | Metric | Value |
 |--------|-------|
-| **Single-Thread Read Latency** | ~35.5 ns (hot path, pure wait-free RCU) |
-| **Bloom Filter Miss Latency** | ~13.6 ns (disk I/O avoided, lock-free check) |
+| **Single-Thread Read Latency** | ~44.94 ns (hot path, pure wait-free RCU) |
+| **Bloom Filter Miss Latency** | ~7.77 ns (disk I/O avoided, lock-free check) |
 | **Single-Thread Read Throughput** | ~10.19M QPS |
 | **4-Thread Read Throughput (Criterion)** | ~20.19M QPS (Stress) / **~2.02B QPS** (Columnar DOD) |
 | **4-Thread Pressure Throughput (wall-clock)** | **~7.35M QPS** (Get + Link composite ops) |

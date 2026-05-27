@@ -21,7 +21,7 @@ cdDB is designed as an extreme-performance, in-memory acceleration layer with ti
 *   **Embedded Ready (NoStd Architecture)**: Decoupled entirely from the Rust `std` library. Utilizing the platform abstraction layer (`platform.rs`), cdDB can run on bare-metal systems, custom kernels, or real-time operating systems (RTOS). Uses lock-free `AtomicBool` spinlocks in `#![no_std]` environments.
 *   **Platform Abstraction Layer (PAL)**: Declares modular traits for `FileSystem`, `ThreadManager`, and `MessageQueue`, isolating physical I/O and runtime scheduling from core database engines.
 *   **Loom Concurrency Checking**: The core engine (QSBR, RCU, etc.) is fully verified by the `loom` crate when the `loom` feature is enabled, mathematically proving wait-free algorithms.
-*   **Asynchronous Write-Behind Logging**: Supports `WalMode::Async100ms` for extreme throughput where data is buffered and daemon-flushed in the background, achieving single-digit nanosecond front-end latencies.
+*   **Asynchronous Write-Behind Logging with Adaptive Group Commit**: Supports `WalMode::Async100ms` for extreme throughput. Under low load, writes are synced immediately for minimal latency. Under high load (exceeding 1000 fsyncs/sec), it dynamically aggregates hundreds of transactions by sleeping for up to 1ms before executing a batch fsync, achieving single-digit nanosecond front-end latencies while controlling physical write amplification.
 
 ---
 

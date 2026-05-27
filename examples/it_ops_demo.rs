@@ -6,7 +6,7 @@ fn main() {
     println!("=== cdDB IT Operations Interface Demo ===");
     
     // Initialize dispatcher
-    let mut db = CdDBDispatcher::new_std(Some("ops_data".into()));
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some("ops_data".into()));
 
     // 1. Register a partition for system metrics
     let ops_tx = db.register_partition("system.metrics".to_string());

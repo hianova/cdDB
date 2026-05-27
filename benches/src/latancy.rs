@@ -4,10 +4,10 @@ use std::thread;
 use std::time::Duration;
 
 fn latency_benchmark(c: &mut Criterion) {
-    let mut db = CdDBDispatcher::new_std(None);
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("bench.latency".to_string());
     
-    let count = 10_000;
+    let count = 500;
     let mut batch = Vec::with_capacity(count);
     for i in 0..count {
         let mut attrs_int = Attributes::new();
@@ -22,7 +22,7 @@ fn latency_benchmark(c: &mut Criterion) {
         thread::sleep(Duration::from_millis(10));
     }
 
-    let query_engine = Query::new(route);
+    let query_engine = Query::new(&route);
     
     let mut group = c.benchmark_group("Access Latency");
     

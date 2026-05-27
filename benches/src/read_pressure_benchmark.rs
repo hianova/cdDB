@@ -10,7 +10,7 @@ fn test_read_pressure_benchmark() {
     
     // 1. Preload entities
     let count = 10_000; 
-    let mut db = CdDBDispatcher::new_std(None);
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
     let tx = db.register_partition("bench.pressure".to_string());
     
     let mut batch = Vec::with_capacity(count);
