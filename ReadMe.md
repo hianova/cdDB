@@ -101,8 +101,8 @@ cargo test --release -p cdDB-benches --test read_pressure_benchmark -- --nocaptu
 
 | Metric | Value |
 |--------|-------|
-| **Single-Thread Read Latency** | ~44.94 ns (hot path, pure wait-free RCU) |
-| **Bloom Filter Miss Latency** | ~7.77 ns (disk I/O avoided, lock-free check) |
+| **Single-Thread Read Latency** | ~28.19 ns (hot path, pure wait-free RCU) |
+| **Bloom Filter Miss Latency** | ~6.75 ns (disk I/O avoided, lock-free check) |
 | **Single-Thread Read Throughput** | ~10.19M QPS |
 | **4-Thread Read Throughput (Criterion)** | ~20.19M QPS (Stress) / **~2.02B QPS** (Columnar DOD) |
 | **4-Thread Pressure Throughput (wall-clock)** | **~7.35M QPS** (Get + Link composite ops) |
