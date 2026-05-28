@@ -89,6 +89,12 @@ pub enum WriteCommand {
     Delete {
         entity_id: usize,
     },
+    InsertFast {
+        entity_id: usize,
+        epoch: u32,
+        record_type: u32,
+        payload: alloc::sync::Arc<Vec<u8>>,
+    },
 }
 
 impl WriteCommand {
@@ -161,6 +167,14 @@ impl WriteCommand {
                 buf.push(2);
                 buf.extend_from_slice(&(*entity_id as u64).to_le_bytes());
             }
+            WriteCommand::InsertFast { entity_id, epoch, record_type, payload } => {
+                buf.push(3);
+                buf.extend_from_slice(&(*entity_id as u64).to_le_bytes());
+                buf.extend_from_slice(&epoch.to_le_bytes());
+                buf.extend_from_slice(&record_type.to_le_bytes());
+                buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                buf.extend_from_slice(payload.as_slice());
+            }
         }
         buf
     }
@@ -232,6 +246,18 @@ impl WriteCommand {
             2 => {
                 let entity_id = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
                 Some(WriteCommand::Delete { entity_id })
+            }
+            3 => {
+                let entity_id = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
+                pos += 8;
+                let epoch = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                let record_type = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?);
+                pos += 4;
+                let len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
+                pos += 4;
+                let payload = alloc::sync::Arc::new(buf.get(pos..pos + len)?.to_vec());
+                Some(WriteCommand::InsertFast { entity_id, epoch, record_type, payload })
             }
             _ => None,
         }

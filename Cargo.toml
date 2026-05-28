@@ -36,6 +36,7 @@ ahash = { version = "0.8", default-features = false, features = ["no-rng"] }
 hashbrown = { version = "0.14", default-features = false, features = ["ahash", "inline-more"] }
 dualcache-ff = { version = "0.3.1", optional = true, default-features = false }
 loom = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["sync", "rt"], optional = true }
 
 [workspace]
 members = [
@@ -49,3 +50,4 @@ default = ["std", "dualcache-ff"]
 std = ["ahash/std", "dualcache-ff?/std"]
 dualcache-ff = ["dep:dualcache-ff"]
 loom = ["dep:loom", "dualcache-ff?/loom"]
+async = ["dep:tokio", "std"]

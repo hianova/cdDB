@@ -109,16 +109,45 @@ pub trait MessageQueue: Send + Sync {
 
 #[cfg(feature = "std")]
 pub struct StdMessageQueue {
-    pub rx: Mutex<std::sync::mpsc::Receiver<crate::commands::PartitionCommand>>,
+    pub rx: alloc::sync::Arc<crate::queue::BoundedQueue<crate::commands::PartitionCommand>>,
+}
+
+pub struct Backoff {
+    spins: u32,
+}
+
+impl Backoff {
+    pub fn new() -> Self {
+        Self { spins: 0 }
+    }
+    
+    pub fn snooze(&mut self) {
+        core::hint::spin_loop();
+        self.spins += 1;
+    }
+    
+    pub fn is_completed(&self) -> bool {
+        self.spins > 100
+    }
 }
 
 #[cfg(feature = "std")]
 impl MessageQueue for StdMessageQueue {
     fn recv(&self) -> Result<crate::commands::PartitionCommand, String> {
-        self.rx.lock().unwrap().recv().map_err(|e: std::sync::mpsc::RecvError| e.to_string())
+        let mut backoff = Backoff::new();
+        loop {
+            if let Some(cmd) = self.rx.pop() {
+                return Ok(cmd);
+            }
+            if backoff.is_completed() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                backoff.snooze();
+            }
+        }
     }
     fn try_recv(&self) -> Result<crate::commands::PartitionCommand, String> {
-        self.rx.lock().unwrap().try_recv().map_err(|e: std::sync::mpsc::TryRecvError| e.to_string())
+        self.rx.pop().ok_or_else(|| "Empty".to_string())
     }
 }
 
@@ -146,12 +175,12 @@ pub trait MessageSender: Send + Sync {
 #[cfg(feature = "std")]
 #[allow(dead_code)]
 pub struct StdMessageSender {
-    pub tx: std::sync::mpsc::SyncSender<crate::commands::PartitionCommand>,
+    pub tx: alloc::sync::Arc<crate::queue::BoundedQueue<crate::commands::PartitionCommand>>,
 }
 
 #[cfg(feature = "std")]
 impl MessageSender for StdMessageSender {
     fn send(&self, cmd: crate::commands::PartitionCommand) -> Result<(), String> {
-        self.tx.send(cmd).map_err(|e| e.to_string())
+        self.tx.push(cmd).map_err(|_| "Full".to_string())
     }
 }

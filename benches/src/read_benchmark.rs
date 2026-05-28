@@ -17,7 +17,8 @@ fn test_read_performance_benchmark() {
     let scan_size = 1_000;
     
     // 1. Prepare Data
-    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
+    let tmp = std::env::temp_dir().join(format!("cdDB_{}", std::process::id()));
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
     let tx = db.register_partition("bench.read".to_string());
     
     let mut batch = Vec::with_capacity(count);

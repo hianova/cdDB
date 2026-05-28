@@ -252,7 +252,7 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         {
             self.worker.leave();
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let _ = self.route.writer_tx.send(PartitionCommand::InternalLoad {
+            let _ = self.route.writer_tx.push(PartitionCommand::InternalLoad {
                 entity_id,
                 response_tx: alloc::boxed::Box::new(tx),
             });

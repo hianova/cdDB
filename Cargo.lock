@@ -117,6 +117,7 @@ dependencies = [
  "dualcache-ff",
  "hashbrown",
  "loom",
+ "tokio",
 ]
 
 [[package]]
@@ -135,6 +136,7 @@ name = "cdDB-tests"
 version = "0.1.0"
 dependencies = [
  "cdDB",
+ "dhat",
  "tokio",
 ]
 

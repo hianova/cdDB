@@ -167,6 +167,15 @@ impl<const N: usize> Partition<N> {
                         next_pointers.remove(&entity_id);
                         self.hot_index.remove(&entity_id);
                     }
+                    WriteCommand::InsertFast { entity_id, epoch, record_type, payload } => {
+                        let mut attributes = Attributes::new();
+                        let mut attributes_int = Attributes::new();
+                        let mut attributes_blob = Attributes::new();
+                        attributes_int.insert("epoch".to_string(), epoch);
+                        attributes_int.insert("type".to_string(), record_type);
+                        attributes_blob.insert("payload".to_string(), payload.as_ref().clone());
+                        self.process_insert(&mut next_pointers, entity_id, attributes, attributes_int, attributes_blob);
+                    }
                 },
                 PartitionCommand::InternalLoad { entity_id, response_tx } => {
                     if let Some(ptr) = next_pointers.get(&entity_id) {

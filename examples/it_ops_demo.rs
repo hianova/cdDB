@@ -6,7 +6,8 @@ fn main() {
     println!("=== cdDB IT Operations Interface Demo ===");
     
     // Initialize dispatcher
-    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some("ops_data".into()));
+    let tmp = std::env::temp_dir().join(format!("cdDB_ops_{}", std::process::id()));
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
 
     // 1. Register a partition for system metrics
     let ops_tx = db.register_partition("system.metrics".to_string());

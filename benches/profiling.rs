@@ -7,7 +7,8 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 fn main() {
     let _profiler = dhat::Profiler::new_heap();
 
-    let mut dispatcher = CdDBDispatcher::<1024>::default();
+    let tmp = std::env::temp_dir().join(format!("cdDB_perf_{}", std::process::id()));
+    let mut dispatcher = CdDBDispatcher::<1024>::new_std(Some(tmp.to_string_lossy().into_owned()));
     let writer = dispatcher.register_partition("perf_part".to_string());
     
     if let Some(route) = dispatcher.get_route("perf_part") {

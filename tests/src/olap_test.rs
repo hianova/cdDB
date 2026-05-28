@@ -1,5 +1,5 @@
 use cdDB::{
-    AggregateOp, Attributes, CdDBDispatcher, CdDbQuery, Query, QueryNode, QueryResult, WriteCommand,
+    AggregateOp, Attributes, CdDBDispatcher, QueryNode, QueryResult, WriteCommand,
 };
 use std::time::Duration;
 use std::thread;
@@ -8,7 +8,8 @@ use std::thread;
 fn test_olap_vectorized_queries() {
     println!("\n=== cdDB OLAP Vectorized Queries Test ===");
 
-    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
+    let tmp = std::env::temp_dir().join(format!("cdDB_{}", std::process::id()));
+    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
     let tx = db.register_partition("olap.test".to_string());
 
     // 1. Insert some data
@@ -30,17 +31,11 @@ fn test_olap_vectorized_queries() {
         thread::sleep(Duration::from_millis(10));
     }
 
-    let query_engine = Query::new(&route);
-
     // 2. Test Scan
     println!("Testing Scan...");
-    let scan_query = CdDbQuery {
-        nodes: vec![QueryNode::Scan {
-            attr: "val",
-        }],
-    };
-    let results = query_engine.execute(scan_query);
-    if let QueryResult::IntList(list) = &results[0] {
+    let mut scan_results = Vec::new();
+    db.execute_batch("olap.test", &[QueryNode::Scan { attr: "val" }], |res| scan_results.push(res));
+    if let QueryResult::IntList(list) = &scan_results[0] {
         assert_eq!(list.len(), count);
         assert_eq!(list[0], 0);
         assert_eq!(list[99], 99);
@@ -51,14 +46,9 @@ fn test_olap_vectorized_queries() {
 
     // 3. Test Aggregate Sum
     println!("Testing Aggregate Sum...");
-    let sum_query = CdDbQuery {
-        nodes: vec![QueryNode::Aggregate {
-            attr: "val",
-            op: AggregateOp::Sum,
-        }],
-    };
-    let results = query_engine.execute(sum_query);
-    if let QueryResult::IntSum(sum) = results[0] {
+    let mut sum_results = Vec::new();
+    db.execute_batch("olap.test", &[QueryNode::Aggregate { attr: "val", op: AggregateOp::Sum }], |res| sum_results.push(res));
+    if let QueryResult::IntSum(sum) = sum_results[0] {
         let expected_sum = (0..count as u64).sum::<u64>();
         assert_eq!(sum, expected_sum);
         println!("  - Sum success: {} (expected {})", sum, expected_sum);
@@ -68,14 +58,9 @@ fn test_olap_vectorized_queries() {
 
     // 4. Test Aggregate Avg
     println!("Testing Aggregate Avg...");
-    let avg_query = CdDbQuery {
-        nodes: vec![QueryNode::Aggregate {
-            attr: "val",
-            op: AggregateOp::Avg,
-        }],
-    };
-    let results = query_engine.execute(avg_query);
-    if let QueryResult::IntAvg(avg) = results[0] {
+    let mut avg_results = Vec::new();
+    db.execute_batch("olap.test", &[QueryNode::Aggregate { attr: "val", op: AggregateOp::Avg }], |res| avg_results.push(res));
+    if let QueryResult::IntAvg(avg) = avg_results[0] {
         let expected_avg = (count - 1) as f64 / 2.0;
         assert_eq!(avg, expected_avg);
         println!("  - Avg success: {} (expected {})", avg, expected_avg);
@@ -85,25 +70,15 @@ fn test_olap_vectorized_queries() {
 
     // 5. Test Aggregate Min/Max/Count
     println!("Testing Aggregate Min/Max/Count...");
-    let mix_query = CdDbQuery {
-        nodes: vec![
-            QueryNode::Aggregate {
-                attr: "val",
-                op: AggregateOp::Min,
-            },
-            QueryNode::Aggregate {
-                attr: "val",
-                op: AggregateOp::Max,
-            },
-            QueryNode::Aggregate {
-                attr: "val",
-                op: AggregateOp::Count,
-            },
-        ],
-    };
-    let results = query_engine.execute(mix_query);
+    let mut mix_results = Vec::new();
+    let nodes = [
+        QueryNode::Aggregate { attr: "val", op: AggregateOp::Min },
+        QueryNode::Aggregate { attr: "val", op: AggregateOp::Max },
+        QueryNode::Aggregate { attr: "val", op: AggregateOp::Count },
+    ];
+    db.execute_batch("olap.test", &nodes, |res| mix_results.push(res));
     
-    match (&results[0], &results[1], &results[2]) {
+    match (&mix_results[0], &mix_results[1], &mix_results[2]) {
         (QueryResult::IntMin(min), QueryResult::IntMax(max), QueryResult::Count(c)) => {
             assert_eq!(*min, 0);
             assert_eq!(*max, 99);

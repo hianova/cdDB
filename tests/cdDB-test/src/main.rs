@@ -14,7 +14,8 @@ async fn main() {
 /// Anti-pattern 4: Serial single operations (no pipelining)
 async fn test_pipelining_impact() {
     println!("\n[Test 1] Pipelining / Batching Impact");
-    let mut db = CdDBDispatcher::new_std(Some("data/serial".into()));
+    let tmp = std::env::temp_dir().join(format!("cdDB_serial_{}", std::process::id()));
+    let mut db = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
     
     // Serial Test
     let writer_tx_serial = db.register_partition("benchmark.serial".to_string());
@@ -57,7 +58,8 @@ async fn test_pipelining_impact() {
 /// Anti-pattern 10: Storing JSON blobs in strings
 async fn test_columnar_efficiency() {
     println!("\n[Test 2] Columnar Efficiency (Anti-pattern 10)");
-    let mut db = CdDBDispatcher::new_std(Some("data/columnar".into()));
+    let tmp = std::env::temp_dir().join(format!("cdDB_columnar_{}", std::process::id()));
+    let mut db = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
     let writer_tx = db.register_partition("benchmark.columnar".to_string());
     
     let count = 50000;
@@ -96,7 +98,8 @@ async fn test_columnar_efficiency() {
 /// Anti-pattern 7: Hot keys
 async fn test_hot_key_pressure() {
     println!("\n[Test 3] Hot Partition Reader Pressure (Anti-pattern 7)");
-    let mut db = CdDBDispatcher::new_std(Some("data/hot".into()));
+    let tmp = std::env::temp_dir().join(format!("cdDB_hot_{}", std::process::id()));
+    let mut db = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
     let writer_tx = db.register_partition("hot.partition".to_string());
     
     let mut attrs_int = Attributes::new();

@@ -8,6 +8,13 @@ publish = false
 cdDB = { path = ".." }
 tokio = { version = "1", features = ["full"] }
 
+[dev-dependencies]
+dhat = "0.3.3"
+
 [[test]]
 name = "olap_test"
 path = "src/olap_test.rs"
+
+[[test]]
+name = "memory_leak_test"
+path = "src/memory_leak_test.rs"

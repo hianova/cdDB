@@ -51,6 +51,7 @@ pub mod platform;
 pub mod qsbr;
 mod storage;
 pub mod unsafe_core;
+pub mod queue;
 mod column;
 pub mod commands;
 mod partition;

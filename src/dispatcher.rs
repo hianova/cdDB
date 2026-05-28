@@ -7,7 +7,9 @@ use crate::query::{Query, QueryNode, QueryResult};
 use crate::platform::atomic::AtomicPtr;
 
 #[cfg(feature = "std")]
-use std::sync::{Mutex, mpsc::SyncSender};
+use std::sync::Mutex;
+#[cfg(feature = "std")]
+use crate::queue::BoundedQueue;
 #[cfg(not(feature = "std"))]
 use crate::platform::Mutex;
 
@@ -96,14 +98,14 @@ impl<const N: usize> CdDBDispatcher<N> {
         path: String,
         wal: Arc<dyn WalProvider>,
     ) -> UserWriter {
-        let (tx, rx) = std::sync::mpsc::sync_channel(262144);
-        let writer_tx_out = tx.clone();
+        let queue = Arc::new(BoundedQueue::new(262144));
+        let writer_tx_out = queue.clone();
         
         let (storage_path, shared_pointers, bloom, columns, hot_index, workers) = self.init_partition_state(&path);
         
         let route = Arc::new(PartitionRoute {
             name: path.clone(),
-            writer_tx: tx,
+            writer_tx: queue.clone(),
             columns: Arc::clone(&columns),
             shared_pointers: Arc::clone(&shared_pointers),
             hot_index: Arc::clone(&hot_index),
@@ -116,7 +118,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         self.route_table.insert(path.clone(), route);
  
         self.spawn_partition_thread(
-            rx,
+            queue,
             columns,
             wal,
             workers,
@@ -175,7 +177,7 @@ impl<const N: usize> CdDBDispatcher<N> {
     #[cfg(feature = "std")]
     fn spawn_partition_thread(
         &self,
-        rx: std::sync::mpsc::Receiver<PartitionCommand>,
+        rx: Arc<BoundedQueue<PartitionCommand>>,
         columns: Arc<AtomicPtr<Columns<N>>>,
         wal: Arc<dyn WalProvider>,
         workers: Arc<AtomicPtr<WorkerNode>>,
@@ -188,7 +190,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         
         self.executor.spawn_task(alloc::boxed::Box::new(move || {
             let mut partition = Partition::new(
-                alloc::boxed::Box::new(crate::platform::StdMessageQueue { rx: Mutex::new(rx) }),
+                alloc::boxed::Box::new(crate::platform::StdMessageQueue { rx }),
                 columns,
                 wal_rt.clone(),
                 workers,
@@ -228,6 +230,26 @@ impl<const N: usize> CdDBDispatcher<N> {
             q.execute_with_cb(nodes, &mut cb);
         }
     }
+
+    /// Execute a batch of query nodes asynchronously.
+    /// This returns a Future that resolves when the queries are completed.
+    /// It is gated behind the `async` feature and requires a Tokio runtime.
+    #[cfg(all(feature = "std", feature = "async"))]
+    pub async fn execute_batch_async<'b>(
+        &self,
+        partition: &str,
+        nodes: &[QueryNode<'b>],
+    ) -> Vec<QueryResult> {
+        let mut results = Vec::with_capacity(nodes.len());
+        if let Some(route) = self.route_table.get(partition) {
+            let q = Query::new(route);
+            // Executed synchronously on the current async worker thread.
+            // For wait-free operations this is extremely fast (~44ns).
+            // If disk I/O is required (cache miss), it will block the thread.
+            q.execute_with_cb(nodes, |res| results.push(res));
+        }
+        results
+    }
 }
 
 #[cfg(feature = "std")]
@@ -238,11 +260,15 @@ impl<const N: usize> Default for CdDBDispatcher<N> {
 }
 
 #[cfg(feature = "std")]
-pub struct UserWriter(SyncSender<PartitionCommand>);
+pub struct UserWriter(Arc<BoundedQueue<PartitionCommand>>);
 #[cfg(feature = "std")]
 impl UserWriter {
-    pub fn send(&self, cmd: WriteCommand) -> Result<(), std::sync::mpsc::SendError<PartitionCommand>> {
-        self.0.send(PartitionCommand::Write(cmd))
+    pub fn send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
+        self.0.push(PartitionCommand::Write(cmd)).map_err(|_| "Full")
+    }
+    
+    pub fn try_send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
+        self.0.push(PartitionCommand::Write(cmd)).map_err(|_| "Full")
     }
 }
 
@@ -250,7 +276,7 @@ impl UserWriter {
 pub struct PartitionRoute<const N: usize> {
     pub name: String,
     #[cfg(feature = "std")]
-    pub writer_tx: SyncSender<PartitionCommand>,
+    pub writer_tx: Arc<BoundedQueue<PartitionCommand>>,
     #[cfg(not(feature = "std"))]
     pub writer_tx: Arc<dyn crate::platform::MessageSender>,
     pub columns: Arc<AtomicPtr<Columns<N>>>,

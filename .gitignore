@@ -3,3 +3,5 @@ TODO.md
 benches/data
 tests/data/
 .DS_Store
+data/
+ops_data/

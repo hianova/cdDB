@@ -83,6 +83,16 @@ db.execute_batch("p", &cmds, cb)────►  query[0] → RCU load → cb(Re
                                  leave QSBR once
 ```
 
+### 3.4 Async Ecosystem Integration
+
+For asynchronous runtime environments like Tokio (e.g. processing Redis commands via TCP streams or Tonic gRPC), a dedicated asynchronous API is available when the `async` feature is enabled.
+
+```rust
+// Available with `features = ["async", "std"]`
+let results = db.execute_batch_async("partition_name", &nodes).await;
+```
+This API returns a `Future` resolving to a `Vec<QueryResult>`. Wait-free memory access paths execute directly inline synchronously for extreme latency optimization (~44ns), avoiding thread context switch overhead for hot data.
+
 
 
 ---
@@ -91,6 +101,7 @@ db.execute_batch("p", &cmds, cb)────►  query[0] → RCU load → cb(Re
 
 *   **Unsafe Archive**: All raw atomic pointer operations, memory reclamation, and raw memory allocations are isolated in `unsafe_core.rs`.
 *   **Safe Wrappers**: The remaining database components consume safe, lifetime-bound APIs, ensuring strict adherence to Rust's safety guarantees.
+*   **Memory Leak Verifications**: Core memory leak testing and `no_std` worker drop verifications are strictly audited via `dhat` heap profiling to ensure safety in long-running embedded usage (`tests/src/memory_leak_test.rs`).
 
 ---
 
