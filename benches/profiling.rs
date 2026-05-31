@@ -1,4 +1,4 @@
-use cdDB::{CdDBDispatcher, PartitionCommand, QueryNode, CdDbQuery, Query, AHashMap};
+use cdDB::{CdDBDispatcher, QueryNode, CdDbQuery, Query, AHashMap};
 use cdDB::commands::{WriteCommand, ColumnValue};
 
 #[global_allocator]
@@ -7,7 +7,8 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 fn main() {
     let _profiler = dhat::Profiler::new_heap();
 
-    let tmp = std::env::temp_dir().join(format!("cdDB_perf_{}", std::process::id()));
+    let _temp_dir = tempfile::tempdir().unwrap();
+    let tmp = _temp_dir.path().to_path_buf();
     let mut dispatcher = CdDBDispatcher::<1024>::new_std(Some(tmp.to_string_lossy().into_owned()));
     let writer = dispatcher.register_partition("perf_part".to_string());
     
@@ -25,6 +26,6 @@ fn main() {
         let q = CdDbQuery {
             nodes: vec![QueryNode::Get { entity_id: 5000, attr: "name" }]
         };
-        let _ = query.execute(q);
+        let _ = query.execute_with_cb(&q.nodes, |_res| {});
     }
 }

@@ -4,10 +4,8 @@ use std::thread;
 
 #[test]
 fn test_cold_data_scan_performance() {
-    let base_path = std::env::current_dir().unwrap().join("test_cold_data");
-    if base_path.exists() {
-        let _ = std::fs::remove_dir_all(&base_path);
-    }
+    let _temp_dir = tempfile::tempdir().unwrap();
+    let base_path = _temp_dir.path().to_path_buf();
     
     let count = 10_000;
     let scan_size = 1_000;
@@ -29,8 +27,11 @@ fn test_cold_data_scan_performance() {
         
         tx.send(WriteCommand::BatchInsert(batch)).unwrap();
         
-        // Give time for persistence
-        thread::sleep(Duration::from_millis(1000));
+        // Wait until all data is processed by the background partition thread
+        let route = db.get_route("cold.bench").unwrap();
+        while route.len(&route.register_worker()) < count {
+            thread::yield_now();
+        }
         println!("  - Data Ingested and Persisted to Disk.");
     }
     
@@ -83,5 +84,5 @@ fn test_cold_data_scan_performance() {
         println!("  Warning: Hot Scan was not faster. (Likely too small dataset or high overhead)");
     }
     
-    let _ = std::fs::remove_dir_all(&base_path);
+
 }

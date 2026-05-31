@@ -3,7 +3,7 @@ use ahash::RandomState;
 
 use crate::platform::atomic::{AtomicUsize, Ordering};
 
-const BITS_PER_WORD: usize = core::mem::size_of::<usize>() * 8;
+
 
 pub struct SimpleBloom<const N: usize> {
     bits: [AtomicUsize; N],
@@ -11,8 +11,7 @@ pub struct SimpleBloom<const N: usize> {
 }
 
 impl<const N: usize> SimpleBloom<N> {
-    const BITS_PER_WORD: usize = core::mem::size_of::<usize>() * 8;
-    const NUM_BITS: usize = N * Self::BITS_PER_WORD;
+    const NUM_BITS: usize = N * core::mem::size_of::<usize>() * 8;
 
     pub fn new() -> Self {
         Self {
@@ -29,7 +28,7 @@ impl<const N: usize> SimpleBloom<N> {
         for i in 0..4u32 {
             let combined_hash = h1.wrapping_add(i.wrapping_mul(h2)) as usize;
             let bit_idx = combined_hash % Self::NUM_BITS;
-            self.bits[bit_idx / Self::BITS_PER_WORD].fetch_or(1 << (bit_idx % Self::BITS_PER_WORD), Ordering::Relaxed);
+            self.bits[bit_idx / 64].fetch_or(1 << (bit_idx % 64), Ordering::Relaxed);
         }
     }
 
@@ -41,7 +40,7 @@ impl<const N: usize> SimpleBloom<N> {
         for i in 0..4u32 {
             let combined_hash = h1.wrapping_add(i.wrapping_mul(h2)) as usize;
             let bit_idx = combined_hash % Self::NUM_BITS;
-            if (self.bits[bit_idx / Self::BITS_PER_WORD].load(Ordering::Relaxed) & (1 << (bit_idx % Self::BITS_PER_WORD))) == 0 {
+            if (self.bits[bit_idx / 64].load(Ordering::Relaxed) & (1 << (bit_idx % 64))) == 0 {
                 return false;
             }
         }
@@ -52,5 +51,20 @@ impl<const N: usize> SimpleBloom<N> {
         for word in self.bits.iter() {
             word.store(0, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "loom")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bloom_filter() {
+        let bloom = SimpleBloom::<1024>::new();
+        let entity_id = 42usize;
+        
+        assert_eq!(bloom.contains(&entity_id), false);
+        bloom.insert(&entity_id);
+        assert_eq!(bloom.contains(&entity_id), true);
     }
 }

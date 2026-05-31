@@ -3,7 +3,8 @@ use criterion::{criterion_group, criterion_main, Criterion, Throughput, black_bo
 use std::thread;
 
 fn throughput_benchmark(c: &mut Criterion) {
-    let tmp = std::env::temp_dir().join(format!("cdDB_{}", std::process::id()));
+    let _temp_dir = tempfile::tempdir().unwrap();
+    let tmp = _temp_dir.path().to_path_buf();
     let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
     let tx = db.register_partition("bench.throughput".to_string());
     
@@ -41,6 +42,9 @@ fn throughput_benchmark(c: &mut Criterion) {
     // --- 2. Read Throughput (Multi-Threaded 4 Readers) ---
     // Distribute `iters` across 4 threads using `iter_custom` to measure true wait-free multi-threaded throughput,
     // avoiding the massive overhead of spawning/joining threads inside the measured hot path.
+    // NOTE: Setting Throughput::Elements(4) because `iter_custom` measures wall-clock time
+    // for all 4 threads running `iters` loops simultaneously. This means each iteration
+    // mathematically completes 4 element reads.
     group.throughput(Throughput::Elements(4));
 
     let num_threads = 4;
@@ -142,25 +146,37 @@ fn throughput_benchmark(c: &mut Criterion) {
     // To correctly benchmark write throughput in an in-memory DB, you should either:
     // 1. Benchmark a fixed size workload outside of `b.iter`.
     // 2. Use `b.iter_batched` to reset the database state between iterations.
-    /*
-    let mut group = c.benchmark_group("Write Throughput");
-    group.throughput(Throughput::Elements(1000)); // Per batch
+    let mut group_write = c.benchmark_group("Write Throughput");
+    group_write.throughput(Throughput::Elements(1000)); // Per batch
     
-    group.bench_function("Batch Insert (1000 items)", |b| {
-        let mut id_gen = count + 1;
-        b.iter(|| {
-            let mut batch = Vec::with_capacity(1000);
-            for _ in 0..1000 {
-                let mut attrs_int = Attributes::new();
-                attrs_int.insert("val".to_string(), id_gen as u32);
-                batch.push((id_gen, Attributes::new(), attrs_int, Attributes::new()));
-                id_gen += 1;
+    group_write.bench_function("Batch Insert (1000 items)", |b| {
+        b.iter_custom(|iters| {
+            let mut total_duration = std::time::Duration::new(0, 0);
+            for _ in 0..iters {
+                let tmp = tempfile::tempdir().unwrap();
+                let mut db = CdDBDispatcher::<1024>::new_std(Some(tmp.path().to_string_lossy().into()));
+                let tx_w = db.register_partition("bench.write".into());
+                
+                let mut batch = Vec::with_capacity(1000);
+                for i in 0..1000 {
+                    let mut attrs_int = Attributes::new();
+                    attrs_int.insert("val".to_string(), i as u32);
+                    batch.push((i, Attributes::new(), attrs_int, Attributes::new()));
+                }
+                
+                let start = std::time::Instant::now();
+                tx_w.send(WriteCommand::BatchInsert(batch)).unwrap();
+                // Wait for the partition to process
+                let route = db.get_route("bench.write").unwrap();
+                while route.len(&route.register_worker()) < 1000 {
+                    thread::yield_now();
+                }
+                total_duration += start.elapsed();
             }
-            tx.send(WriteCommand::BatchInsert(batch)).unwrap();
+            total_duration
         });
     });
-    group.finish();
-    */
+    group_write.finish();
 }
 
 criterion_group!(benches, throughput_benchmark);

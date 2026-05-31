@@ -31,7 +31,7 @@ Add `cdDB` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cdDB = "0.3.1"
+cdDB = "0.4.0"
 ```
 
 ### Basic Usage (Synchronous)
@@ -97,7 +97,7 @@ cargo bench -p cdDB-benches
 cargo test --release -p cdDB-benches --test read_pressure_benchmark -- --nocapture
 ```
 
-### Latest Audit Results (v0.3.1, Apple Silicon, Release Profile)
+### Latest Audit Results (v0.4.0, Apple Silicon, Release Profile)
 
 | Metric | Value |
 |--------|-------|

@@ -52,14 +52,14 @@ pub mod qsbr;
 mod storage;
 pub mod unsafe_core;
 pub mod queue;
-mod column;
+pub mod column;
 pub mod commands;
 mod partition;
 mod query;
 mod dispatcher;
 mod ops;
 mod bloom;
-mod wal;
+pub mod wal;
 
 #[cfg(not(feature = "dualcache-ff"))]
 mod dualcache_stub;

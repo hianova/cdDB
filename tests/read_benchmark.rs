@@ -11,13 +11,14 @@ struct TraditionalStruct {
 
 #[test]
 fn test_read_performance_benchmark() {
-    println!("\n=== cdDB Fair Performance Audit (100,000 Entities) ===");
+    println!("\n=== cdDB Fair Performance Audit (10,000 Entities) ===");
     
     let count = 10_000;
     let scan_size = 1_000;
     
     // 1. Prepare Data
-    let tmp = std::env::temp_dir().join(format!("cdDB_{}", std::process::id()));
+    let _temp_dir = tempfile::tempdir().unwrap();
+    let tmp = _temp_dir.path().to_path_buf();
     let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
     let tx = db.register_partition("bench.read".to_string());
     
@@ -114,7 +115,24 @@ fn test_read_performance_benchmark() {
     println!("  - cdDB Bloom Misses:   {:?}", dur_f);
 
     println!("\n--- Audit Conclusion ---");
-    println!("1. Scan Efficiency: cdDB is {:.2}x faster than Vec<Struct> (DOD benefit)", dur_b.as_secs_f64() / dur_a.as_secs_f64());
-    println!("2. Lookup Overhead: cdDB Query API is {:.2}x slower than HashMap (Sync/Security overhead)", dur_d.as_secs_f64() / dur_c.as_secs_f64());
-    println!("3. Bloom Impact:    cdDB Misses are {:.2}x slower/faster than HashMap Misses", dur_f.as_secs_f64() / dur_e.as_secs_f64());
+    let a_sec = dur_a.as_secs_f64();
+    if a_sec > 0.0 {
+        println!("1. Scan Efficiency: cdDB is {:.2}x faster than Vec<Struct> (DOD benefit)", dur_b.as_secs_f64() / a_sec);
+    } else {
+        println!("1. Scan Efficiency: cdDB is infinitely faster (0.0s measured)");
+    }
+    
+    let c_sec = dur_c.as_secs_f64();
+    if c_sec > 0.0 {
+        println!("2. Lookup Overhead: cdDB Query API is {:.2}x slower than HashMap (Sync/Security overhead)", dur_d.as_secs_f64() / c_sec);
+    } else {
+        println!("2. Lookup Overhead: HashMap is infinitely faster (0.0s measured)");
+    }
+    
+    let e_sec = dur_e.as_secs_f64();
+    if e_sec > 0.0 {
+        println!("3. Bloom Impact:    cdDB Misses are {:.2}x slower/faster than HashMap Misses", dur_f.as_secs_f64() / e_sec);
+    } else {
+        println!("3. Bloom Impact:    HashMap Misses are infinitely faster (0.0s measured)");
+    }
 }

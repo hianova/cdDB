@@ -52,5 +52,12 @@ fn test_qsbr_worker_registration() {
         }
         
         assert_eq!(count, 2);
+        
+        let mut curr = workers.load(loom::sync::atomic::Ordering::Acquire);
+        while !curr.is_null() {
+            let next = unsafe { (*curr).next.load(loom::sync::atomic::Ordering::Acquire) };
+            unsafe { drop(Box::from_raw(curr)); }
+            curr = next;
+        }
     });
 }

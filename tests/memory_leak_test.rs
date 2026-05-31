@@ -6,6 +6,7 @@ use std::thread;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
+
 #[test]
 fn test_memory_leak_and_thread_drop() {
     let _profiler = dhat::Profiler::builder().testing().build();
@@ -13,8 +14,9 @@ fn test_memory_leak_and_thread_drop() {
     println!("=== Starting Memory Leak & Thread Drop Test ===");
 
     {
-        let tmp = std::env::temp_dir().join(format!("cdDB_{}", std::process::id()));
-    let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
+        let _temp_dir = tempfile::tempdir().unwrap();
+        let tmp = _temp_dir.path().to_path_buf();
+        let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
         let tx = db.register_partition("test.memory_leak".to_string());
 
         // 1. Insert Data
@@ -45,17 +47,17 @@ fn test_memory_leak_and_thread_drop() {
             h.join().unwrap();
         }
 
-        // Wait to ensure everything is flushed/processed
-        thread::sleep(Duration::from_millis(100));
-        
-        // CdDBDispatcher and its routes will be dropped at the end of this block
     }
+
+    // Wait to ensure background threads receive the channel disconnect and exit gracefully
+    thread::sleep(Duration::from_millis(200));
 
     // After this scope, all DB instances, partition threads, and channels should be dropped.
     // dhat will panic when _profiler is dropped if there are any unfreed allocations.
     // However, since we use testing() mode, we can explicitly assert stats.
     let stats = dhat::HeapStats::get();
     println!("Heap Stats: {:?}", stats);
+    assert!(stats.curr_blocks < 300, "Potential leak: {} blocks still alive", stats.curr_blocks);
     
     // Note: Due to some static lazy_statics or internal library allocations,
     // exact 0 might be hard, but this verifies major structural drops.

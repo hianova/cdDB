@@ -140,7 +140,7 @@ impl MessageQueue for StdMessageQueue {
                 return Ok(cmd);
             }
             if backoff.is_completed() {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+                std::thread::yield_now();
             } else {
                 backoff.snooze();
             }
@@ -180,7 +180,20 @@ pub struct StdMessageSender {
 
 #[cfg(feature = "std")]
 impl MessageSender for StdMessageSender {
-    fn send(&self, cmd: crate::commands::PartitionCommand) -> Result<(), String> {
-        self.tx.push(cmd).map_err(|_| "Full".to_string())
+    fn send(&self, mut cmd: crate::commands::PartitionCommand) -> Result<(), String> {
+        let mut backoff = Backoff::new();
+        loop {
+            match self.tx.push(cmd) {
+                Ok(()) => return Ok(()),
+                Err(c) => {
+                    cmd = c;
+                    if backoff.is_completed() {
+                        std::thread::yield_now();
+                    } else {
+                        backoff.snooze();
+                    }
+                }
+            }
+        }
     }
 }

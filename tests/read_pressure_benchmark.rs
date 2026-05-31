@@ -10,7 +10,8 @@ fn test_read_pressure_benchmark() {
     
     // 1. Preload entities
     let count = 10_000; 
-    let tmp = std::env::temp_dir().join(format!("cdDB_{}", std::process::id()));
+    let _temp_dir = tempfile::tempdir().unwrap();
+    let tmp = _temp_dir.path().to_path_buf();
     let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
     let tx = db.register_partition("bench.pressure".to_string());
     
@@ -32,9 +33,7 @@ fn test_read_pressure_benchmark() {
     }
     println!("  - Data Prep Done ({} entities): {:?}", count, start_load.elapsed());
     
-    // 2. Stabilization
-    thread::sleep(Duration::from_secs(1));
-    
+    // 2. Stabilization (Removed redundant sleep since route.len() confirmed data)    
     // 3. Multi-threaded Read Bombing
     let num_threads = 4;
     let ops_per_thread = 250_000;
@@ -62,7 +61,10 @@ fn test_read_pressure_benchmark() {
                 
                 let start_op = Instant::now();
                 query_engine.execute_with_cb(&nodes, |res| {
-                    black_box(res);
+                    match res {
+                        cdDB::QueryResult::None => panic!("Unexpected None for existing entity"),
+                        other => { black_box(other); }
+                    }
                 });
                 let duration = start_op.elapsed();
                 latencies.push(duration.as_nanos() as u64);

@@ -9,7 +9,7 @@ use crate::platform::FileSystem;
 #[cfg(not(feature = "std"))]
 use crate::platform::Mutex;
 
-use crate::{DualCacheFF, Config};
+use crate::DualCacheFF;
 use crate::bloom::SimpleBloom;
 
 use crate::column::Columns;
@@ -35,7 +35,8 @@ pub struct Partition<const N: usize> {
 
     // 持久層與快照
     pub storage: Arc<Storage>,
-    pub hot_index: DualCacheFF<usize, ()>, // Just for heat tracking
+    pub hot_index: Arc<DualCacheFF<(u32, usize), ()>>, // Just for heat tracking
+    pub partition_id: u32,
     pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
 
     // WAL 支援
@@ -55,6 +56,8 @@ impl<const N: usize> Partition<N> {
         fs: Arc<dyn FileSystem>,
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
         bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
+        hot_index: Arc<DualCacheFF<(u32, usize), ()>>,
+        partition_id: u32,
     ) -> Self {
         let storage = Arc::new(Storage::new(storage_path, fs.clone()));
         let bloom_bits = 1024 * 1024;
@@ -66,7 +69,8 @@ impl<const N: usize> Partition<N> {
             wal,
             qsbr: QsbrManager::new(workers),
             storage,
-            hot_index: DualCacheFF::new(Config::with_memory_budget(100, 60)),
+            hot_index,
+            partition_id,
             bloom_filter,
             bloom_count: 0,
             bloom_bits,
@@ -111,15 +115,25 @@ impl<const N: usize> Partition<N> {
     }
 
     pub fn run(mut self) {
+        #[cfg(feature = "std")]
+        {
+            let storage_clone = Arc::downgrade(&self.storage);
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(300));
+                    if let Some(s) = storage_clone.upgrade() {
+                        let _ = s.compact();
+                    } else {
+                        break;
+                    }
+                }
+            });
+        }
+
         loop {
             let cmd_res = self.writer_rx.recv();
-            #[cfg(feature = "std")]
             let cmd = match cmd_res {
-                Ok(c) => c,
-                Err(_) => break,
-            };
-            #[cfg(not(feature = "std"))]
-            let cmd = match cmd_res {
+                Ok(crate::commands::PartitionCommand::Shutdown) => break,
                 Ok(c) => c,
                 Err(_) => break,
             };
@@ -127,6 +141,10 @@ impl<const N: usize> Partition<N> {
             let mut commands = vec![cmd];
             for _ in 0..1000 {
                 if let Ok(next) = self.writer_rx.try_recv() {
+                    if let crate::commands::PartitionCommand::Shutdown = next {
+                        commands.push(next);
+                        break;
+                    }
                     commands.push(next);
                 } else {
                     break;
@@ -164,11 +182,14 @@ impl<const N: usize> Partition<N> {
                         }
                     }
                     WriteCommand::Delete { entity_id } => {
-                        next_pointers.remove(&entity_id);
-                        self.hot_index.remove(&entity_id);
+                        next_pointers.insert(entity_id, MultiVectorPointer {
+                            entity_id,
+                            attribute_indices: AHashMap::default(),
+                        });
+                        self.hot_index.remove(&(self.partition_id, entity_id));
                     }
                     WriteCommand::InsertFast { entity_id, epoch, record_type, payload } => {
-                        let mut attributes = Attributes::new();
+                        let attributes = Attributes::new();
                         let mut attributes_int = Attributes::new();
                         let mut attributes_blob = Attributes::new();
                         attributes_int.insert("epoch".to_string(), epoch);
@@ -198,6 +219,7 @@ impl<const N: usize> Partition<N> {
                     
                     let _ = response_tx.send(target);
                 }
+                crate::commands::PartitionCommand::Shutdown => {}
             }
         }
 
@@ -245,7 +267,7 @@ impl<const N: usize> Partition<N> {
         };
 
         next_pointers.insert(entity_id, ptr);
-        self.hot_index.insert(entity_id, ());
+        self.hot_index.insert((self.partition_id, entity_id), ());
 
         let entity_data = EntityData {
             entity_id,
@@ -282,7 +304,7 @@ impl<const N: usize> Partition<N> {
         }
         let ptr = MultiVectorPointer { entity_id: data.entity_id, attribute_indices: new_indices };
         next.insert(data.entity_id, ptr.clone());
-        self.hot_index.insert(data.entity_id, ());
+        self.hot_index.insert((self.partition_id, data.entity_id), ());
         ptr
     }
 
@@ -355,17 +377,17 @@ impl<const N: usize> Partition<N> {
         }
     }
 
-    fn insert_into_column<T: Clone>(&mut self, col: &crate::column::ColumnArray<T, N>, val: T) -> usize {
+    fn insert_into_column<T: Default + Clone>(&mut self, col: &crate::column::ColumnArray<T, N>, val: T) -> usize {
         let mut wl = load_clone(&col.waitlist);
         let mut data = load_clone(&col.data);
 
         let idx;
         if let Some(i) = wl.pop() {
-            data[i] = Some(val);
+            data.set(i, val);
             idx = i;
         } else {
             idx = data.len();
-            data.push(Some(val));
+            data.push(val);
         }
 
         let old_wl = swap_ptr(&col.waitlist, wl);

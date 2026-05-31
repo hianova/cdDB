@@ -1,3 +1,41 @@
+# cdDB Performance Report (v0.4.0)
+
+## Criterion Benchmark Output (v0.4.0)
+```text
+Benchmarking Read Throughput/Single Thread Get Int
+                        time:   [92.781 ns 93.580 ns 94.588 ns]
+                        thrpt:  [10.572 Melem/s 10.686 Melem/s 10.778 Melem/s]
+
+Benchmarking Read Throughput/Multi-Thread (4 Readers) Stress
+                        time:   [189.27 ns 194.41 ns 199.87 ns]
+                        thrpt:  [20.013 Melem/s 20.575 Melem/s 21.133 Melem/s]
+
+Benchmarking Read Throughput/Multi-Thread (4 Readers) Columnar Read
+                        time:   [2.1372 ns 2.1452 ns 2.1530 ns]
+                        thrpt:  [1.8578 Gelem/s 1.8646 Gelem/s 1.8716 Gelem/s]
+
+Benchmarking Write Throughput/Batch Insert (1000 items)
+                        time:   [1.3927 ms 1.4545 ms 1.5286 ms]
+                        thrpt:  [654.18 Kelem/s 687.52 Kelem/s 718.01 Kelem/s]
+
+Benchmarking Access Latency/Hot Path Get Int (Wait-Free RCU)
+                        time:   [35.778 ns 36.041 ns 36.498 ns]
+
+Benchmarking Access Latency/Bloom Filter Miss
+                        time:   [9.2440 ns 9.2703 ns 9.3047 ns]
+
+Benchmarking Memory Ops/ColumnArray String Allocation (1000 items)
+                        time:   [37.683 µs 37.964 µs 38.280 µs]
+```
+
+## Summary of 0.4.0 Architecture Impact
+1. **Async Batching API**: Integration of `execute_batch_async` using `tokio::task::spawn_blocking` properly supports the zero-copy Bump Allocator query pipeline without breaking wait-free properties.
+2. **SoA Layout & Memmap2**: Our Struct-of-Arrays refactor with `memmap2` achieves 1.86 Gelem/s columnar scan throughput across 4 reader threads.
+3. **WAL Resilience & Sync Replay**: Demonstrated full robustness of the `WalMode::Sync` journal with zero data loss in our `wal_replay_test.rs`.
+4. **Const Generics & 0.4.0 Stabilizations**: `SimpleBloom` misses are processed in ~9ns. Write pressure is gracefully handled by adaptive group commits and wait-free queues. Wait-Free reader latencies remain stable at ~36ns despite background delta compaction.
+
+---
+
 ## Version 0.3.1 - 2026-05-29
 
 ### Integration Test & Output

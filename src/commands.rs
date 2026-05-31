@@ -24,6 +24,10 @@ impl<V> Attributes<V> {
         self.0.insert(key, value);
     }
 
+    pub fn get(&self, key: &str) -> Option<&V> {
+        self.0.get(key)
+    }
+
     pub fn inner(&self) -> &AHashMap<String, V> {
         &self.0
     }
@@ -282,6 +286,7 @@ pub enum PartitionCommand {
         entity_id: usize,
         response_tx: alloc::boxed::Box<dyn ResponseSender<Option<MultiVectorPointer>>>,
     },
+    Shutdown,
 }
 
 impl core::fmt::Debug for PartitionCommand {
@@ -291,6 +296,35 @@ impl core::fmt::Debug for PartitionCommand {
             PartitionCommand::InternalLoad { entity_id, .. } => f.debug_struct("InternalLoad")
                 .field("entity_id", entity_id)
                 .finish(),
+            PartitionCommand::Shutdown => f.debug_tuple("Shutdown").finish(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_command_encode_decode() {
+        let mut attrs_int = Attributes::new();
+        attrs_int.insert("val".to_string(), 42);
+        
+        let cmd = WriteCommand::Insert {
+            entity_id: 1,
+            attributes: Attributes::new(),
+            attributes_int: attrs_int,
+            attributes_blob: Attributes::new(),
+        };
+        
+        let bytes = cmd.encode();
+        let decoded = WriteCommand::decode(&bytes).unwrap();
+        
+        if let WriteCommand::Insert { entity_id, attributes_int, .. } = decoded {
+            assert_eq!(entity_id, 1);
+            assert_eq!(attributes_int.get("val"), Some(&42));
+        } else {
+            panic!("Decode failed");
         }
     }
 }

@@ -51,20 +51,37 @@ pub struct CdDbQuery<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub enum QueryResult {
+pub enum QueryResult<'a> {
     Str(String),
     Int(u32),
     Blob(Vec<u8>),
-    IntRange(Vec<u32>),
+    IntRange(&'a [u32]),
     IntSum(u64),
     IntAvg(f64),
     IntMin(u32),
     IntMax(u32),
     Count(usize),
-    IntList(Vec<u32>),
-    StrList(Vec<String>),
-    BlobList(Vec<Vec<u8>>),
+    IntList(&'a [u32]),
+    StrList(&'a [&'a str]),
+    BlobList(&'a [&'a [u8]]),
     None,
+}
+
+pub struct Bump<T> {
+    chunks: core::cell::RefCell<Vec<Vec<T>>>,
+}
+
+impl<T: Clone> Bump<T> {
+    pub fn new() -> Self {
+        Self { chunks: core::cell::RefCell::new(Vec::new()) }
+    }
+    
+    pub fn alloc(&self, data: Vec<T>) -> &mut [T] {
+        let mut chunks = self.chunks.borrow_mut();
+        chunks.push(data);
+        let last = chunks.last_mut().unwrap();
+        unsafe { core::slice::from_raw_parts_mut(last.as_mut_ptr(), last.len()) }
+    }
 }
 
 pub struct Query<'a, const N: usize> {
@@ -75,6 +92,9 @@ pub struct Query<'a, const N: usize> {
 pub struct QuerySession<'a, const N: usize> {
     route: &'a PartitionRoute<N>,
     worker: &'a WorkerState,
+    int_arena: Bump<u32>,
+    str_arena: Bump<&'a str>,
+    blob_arena: Bump<&'a [u8]>,
 }
 
 impl<'a, const N: usize> Query<'a, N> {
@@ -87,16 +107,9 @@ impl<'a, const N: usize> Query<'a, N> {
         QuerySession::new(self.route, &self.worker)
     }
 
-    pub fn execute<'b>(&self, query: CdDbQuery<'b>) -> Vec<QueryResult> {
-        let session = self.session();
-        let mut results = Vec::new();
-        session.execute_with_cb(&query.nodes, |res| results.push(res));
-        results
-    }
-
     pub fn execute_with_cb<'b, F>(&self, nodes: &[QueryNode<'b>], cb: F)
     where
-        F: FnMut(QueryResult),
+        F: FnMut(QueryResult<'_>),
     {
         self.session().execute_with_cb(nodes, cb);
     }
@@ -117,7 +130,13 @@ impl<'a, const N: usize> Query<'a, N> {
 impl<'a, const N: usize> QuerySession<'a, N> {
     pub fn new(route: &'a PartitionRoute<N>, worker: &'a WorkerState) -> Self {
         worker.enter();
-        Self { route, worker }
+        Self { 
+            route, 
+            worker,
+            int_arena: Bump::new(),
+            str_arena: Bump::new(),
+            blob_arena: Bump::new(),
+        }
     }
 
     pub fn execute_with_cb<'b, F>(&self, nodes: &[QueryNode<'b>], mut cb: F)
@@ -171,9 +190,10 @@ impl<'a, const N: usize> QuerySession<'a, N> {
                                         .take(*len)
                                         .flatten()
                                         .cloned()
-                                        .collect()
+                                        .collect::<Vec<u32>>()
                                 });
-                                cb(QueryResult::IntRange(range_vals));
+                                let slice = self.int_arena.alloc(range_vals);
+                                cb(QueryResult::IntRange(slice));
                                 continue;
                             }
                         }
@@ -183,19 +203,24 @@ impl<'a, const N: usize> QuerySession<'a, N> {
                 QueryNode::Scan { attr } => {
                     if let Some(col) = self.route.get_column_int(attr, &self.worker) {
                         let vals = col.with_data_pinned(|data| {
-                            data.iter().flatten().cloned().collect()
+                            data.iter().flatten().cloned().collect::<Vec<u32>>()
                         });
-                        cb(QueryResult::IntList(vals));
+                        let slice = self.int_arena.alloc(vals);
+                        cb(QueryResult::IntList(slice));
                     } else if let Some(col) = self.route.get_column_str(attr, &self.worker) {
                         let vals = col.with_data_pinned(|data| {
-                            data.iter().flatten().cloned().collect()
+                            let data_ref = unsafe { core::mem::transmute::<&_, &'a crate::column::ColumnData<String>>(data) };
+                            data_ref.iter().flatten().map(|s| s.as_str()).collect::<Vec<&'a str>>()
                         });
-                        cb(QueryResult::StrList(vals));
+                        let slice = self.str_arena.alloc(vals);
+                        cb(QueryResult::StrList(slice));
                     } else if let Some(col) = self.route.get_column_blob(attr, &self.worker) {
                         let vals = col.with_data_pinned(|data| {
-                            data.iter().flatten().cloned().collect()
+                            let data_ref = unsafe { core::mem::transmute::<&_, &'a crate::column::ColumnData<Vec<u8>>>(data) };
+                            data_ref.iter().flatten().map(|s| s.as_slice()).collect::<Vec<&'a [u8]>>()
                         });
-                        cb(QueryResult::BlobList(vals));
+                        let slice = self.blob_arena.alloc(vals);
+                        cb(QueryResult::BlobList(slice));
                     } else {
                         cb(QueryResult::None);
                     }
@@ -237,7 +262,7 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         // 1. Memory Index Check (Wait-Free RCU) - Primary Hot Path
         let snap = load_ref(&self.route.shared_pointers);
         if let Some(p) = snap.get(&entity_id) {
-            let _ = self.route.hot_index.get(&entity_id); // Track hit
+            let _ = self.route.hot_index.get(&(self.route.partition_id, entity_id)); // Track hit
             return Some(p);
         }
 
@@ -361,7 +386,11 @@ impl<'a, const N: usize> QuerySession<'a, N> {
     pub fn entities_iter(&self) -> impl Iterator<Item = usize> {
         let snap = load_ref(&self.route.shared_pointers);
         // Safety: Snapshot is kept alive by the worker state in QuerySession
-        snap.keys().cloned().collect::<Vec<_>>().into_iter()
+        snap.iter()
+            .filter(|(_, ptr)| !ptr.attribute_indices.is_empty())
+            .map(|(k, _)| *k)
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 
@@ -377,10 +406,6 @@ impl<'a, const N: usize> Query<'a, N> {
         bloom.insert(&entity_id);
     }
 
-    pub fn entities(&self) -> Vec<usize> {
-        Vec::new()
-    }
-
     pub fn sum_int_range(&self, attr: &str, start_idx: usize, len: usize) -> Option<u64> {
         self.route.get_column_int(attr, &self.worker).map(|col| {
             col.with_data(&self.worker, |data| {
@@ -392,5 +417,40 @@ impl<'a, const N: usize> Query<'a, N> {
                     .sum()
             })
         })
+    }
+}
+#[cfg(all(test, not(feature = "loom")))]
+mod tests {
+    use super::*;
+    use crate::column::{ColumnArray, ColumnData};
+    use crate::qsbr::QsbrManager;
+    use crate::unsafe_core::{load_clone, swap_ptr};
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use alloc::string::ToString;
+
+    #[test]
+    fn test_unsafe_transmute_lifetime() {
+        use crate::platform::atomic::AtomicPtr;
+        let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
+        let mut qsbr = QsbrManager::new(workers);
+        let col = Arc::new(ColumnArray::<alloc::string::String, 1024>::new());
+        col.acquire_lock();
+        let mut next = load_clone(&col.data);
+        next.push("hello".to_string());
+        next.push("world".to_string());
+        let old = swap_ptr(&col.data, next);
+        qsbr.defer_free(old);
+        col.release_lock();
+
+        let mut vals = vec![];
+        col.with_data_pinned(|data| {
+            let data_ref = unsafe { core::mem::transmute::<&_, &'static ColumnData<alloc::string::String>>(data) };
+            vals = data_ref.iter().flatten().map(|s| s.as_str()).collect::<Vec<&'static str>>();
+        });
+
+        assert_eq!(vals.len(), 2);
+        assert_eq!(vals[0], "hello");
+        assert_eq!(vals[1], "world");
     }
 }

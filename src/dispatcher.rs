@@ -7,8 +7,6 @@ use crate::query::{Query, QueryNode, QueryResult};
 use crate::platform::atomic::AtomicPtr;
 
 #[cfg(feature = "std")]
-use std::sync::Mutex;
-#[cfg(feature = "std")]
 use crate::queue::BoundedQueue;
 #[cfg(not(feature = "std"))]
 use crate::platform::Mutex;
@@ -37,6 +35,8 @@ pub struct CdDBDispatcher<const N: usize> {
     pub workers: Arc<AtomicPtr<WorkerNode>>,
     pub fs: Arc<dyn FileSystem>,
     pub executor: Arc<dyn Executor>,
+    pub global_cache: Arc<DualCacheFF<(u32, usize), ()>>,
+    pub next_partition_id: u32,
 }
 
 impl<const N: usize> CdDBDispatcher<N> {
@@ -51,6 +51,8 @@ impl<const N: usize> CdDBDispatcher<N> {
             workers: Arc::new(crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut())),
             fs,
             executor,
+            global_cache: Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60))),
+            next_partition_id: 0,
         }
     }
 
@@ -101,14 +103,17 @@ impl<const N: usize> CdDBDispatcher<N> {
         let queue = Arc::new(BoundedQueue::new(262144));
         let writer_tx_out = queue.clone();
         
-        let (storage_path, shared_pointers, bloom, columns, hot_index, workers) = self.init_partition_state(&path);
+        let partition_id = self.next_partition_id;
+        self.next_partition_id += 1;
+        let (storage_path, shared_pointers, bloom, columns, workers) = self.init_partition_state(&path);
         
         let route = Arc::new(PartitionRoute {
             name: path.clone(),
+            partition_id,
             writer_tx: queue.clone(),
             columns: Arc::clone(&columns),
             shared_pointers: Arc::clone(&shared_pointers),
-            hot_index: Arc::clone(&hot_index),
+            hot_index: Arc::clone(&self.global_cache),
             bloom_filter: Arc::clone(&bloom),
             storage: Arc::new(Storage::new(storage_path.clone(), self.fs.clone())),
             workers: Arc::clone(&workers),
@@ -125,6 +130,8 @@ impl<const N: usize> CdDBDispatcher<N> {
             storage_path,
             shared_pointers,
             bloom,
+            partition_id,
+            self.global_cache.clone(),
         );
  
         UserWriter(writer_tx_out)
@@ -137,14 +144,17 @@ impl<const N: usize> CdDBDispatcher<N> {
         writer_tx: Arc<dyn crate::platform::MessageSender>,
         _writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
     ) {
-        let (storage_path, shared_pointers, bloom, columns, hot_index, workers) = self.init_partition_state(&path);
+        let partition_id = self.next_partition_id;
+        self.next_partition_id += 1;
+        let (storage_path, shared_pointers, bloom, columns, workers) = self.init_partition_state(&path);
         
         let route = Arc::new(PartitionRoute {
             name: path.clone(),
+            partition_id,
             writer_tx,
             columns: Arc::clone(&columns),
             shared_pointers: Arc::clone(&shared_pointers),
-            hot_index: Arc::clone(&hot_index),
+            hot_index: Arc::clone(&self.global_cache),
             bloom_filter: Arc::clone(&bloom),
             storage: Arc::new(Storage::new(storage_path.clone(), self.fs.clone())),
             workers: Arc::clone(&workers),
@@ -156,7 +166,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         // In no_std, the user must manage the thread/loop for the Partition
     }
 
-    fn init_partition_state(&self, path: &str) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<AtomicPtr<SimpleBloom<N>>>, Arc<AtomicPtr<Columns<N>>>, Arc<DualCacheFF<usize, ()>>, Arc<AtomicPtr<WorkerNode>>) {
+    fn init_partition_state(&self, path: &str) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<AtomicPtr<SimpleBloom<N>>>, Arc<AtomicPtr<Columns<N>>>, Arc<AtomicPtr<WorkerNode>>) {
         let storage_path = self
             .base_path
             .as_ref()
@@ -168,10 +178,9 @@ impl<const N: usize> CdDBDispatcher<N> {
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<N>::new()));
         let columns = Arc::new(new_atomic_ptr(Columns::<N>::new()));
-        let hot_index = Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60)));
         let workers = Arc::new(crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut()));
         
-        (storage_path, shared_pointers, bloom, columns, hot_index, workers)
+        (storage_path, shared_pointers, bloom, columns, workers)
     }
 
     #[cfg(feature = "std")]
@@ -184,6 +193,8 @@ impl<const N: usize> CdDBDispatcher<N> {
         storage_path: String,
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
         bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
+        partition_id: u32,
+        hot_index: Arc<DualCacheFF<(u32, usize), ()>>,
     ) {
         let fs_rt = self.fs.clone();
         let wal_rt = wal.clone();
@@ -198,6 +209,8 @@ impl<const N: usize> CdDBDispatcher<N> {
                 fs_rt,
                 shared_pointers,
                 bloom_filter,
+                hot_index,
+                partition_id,
             );
 
             partition.replay_wal();
@@ -232,23 +245,30 @@ impl<const N: usize> CdDBDispatcher<N> {
     }
 
     /// Execute a batch of query nodes asynchronously.
-    /// This returns a Future that resolves when the queries are completed.
-    /// It is gated behind the `async` feature and requires a Tokio runtime.
     #[cfg(all(feature = "std", feature = "async"))]
-    pub async fn execute_batch_async<'b>(
+    pub async fn execute_batch_async<'b, F, R>(
         &self,
-        partition: &str,
-        nodes: &[QueryNode<'b>],
-    ) -> Vec<QueryResult> {
-        let mut results = Vec::with_capacity(nodes.len());
-        if let Some(route) = self.route_table.get(partition) {
-            let q = Query::new(route);
-            // Executed synchronously on the current async worker thread.
-            // For wait-free operations this is extremely fast (~44ns).
-            // If disk I/O is required (cache miss), it will block the thread.
-            q.execute_with_cb(nodes, |res| results.push(res));
+        partition: String,
+        nodes: Vec<QueryNode<'static>>,
+        mut cb: F,
+    ) -> Option<R>
+    where
+        F: FnMut(QueryResult) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        if let Some(route) = self.route_table.get(&partition).cloned() {
+            let res = tokio::task::spawn_blocking(move || {
+                let q = Query::new(&route);
+                let mut last_res = None;
+                q.execute_with_cb(&nodes, |res| {
+                    last_res = Some(cb(res));
+                });
+                last_res
+            }).await.unwrap();
+            res
+        } else {
+            None
         }
-        results
     }
 }
 
@@ -264,24 +284,49 @@ pub struct UserWriter(Arc<BoundedQueue<PartitionCommand>>);
 #[cfg(feature = "std")]
 impl UserWriter {
     pub fn send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
-        self.0.push(PartitionCommand::Write(cmd)).map_err(|_| "Full")
+        let mut cmd = PartitionCommand::Write(cmd);
+        let mut backoff = crate::platform::Backoff::new();
+        loop {
+            match self.0.push(cmd) {
+                Ok(()) => return Ok(()),
+                Err(c) => {
+                    cmd = c;
+                    if backoff.is_completed() {
+                        std::thread::yield_now();
+                    } else {
+                        backoff.snooze();
+                    }
+                }
+            }
+        }
     }
-    
     pub fn try_send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
         self.0.push(PartitionCommand::Write(cmd)).map_err(|_| "Full")
+    }
+}
+
+#[cfg(feature = "std")]
+impl Drop for UserWriter {
+    fn drop(&mut self) {
+        // Send shutdown command on drop to gracefully terminate the background partition thread
+        let mut retries = 0;
+        while self.0.push(PartitionCommand::Shutdown).is_err() && retries < 100 {
+            retries += 1;
+        }
     }
 }
 
 #[derive(Clone)]
 pub struct PartitionRoute<const N: usize> {
     pub name: String,
+    pub partition_id: u32,
     #[cfg(feature = "std")]
     pub writer_tx: Arc<BoundedQueue<PartitionCommand>>,
     #[cfg(not(feature = "std"))]
     pub writer_tx: Arc<dyn crate::platform::MessageSender>,
     pub columns: Arc<AtomicPtr<Columns<N>>>,
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
-    pub hot_index: Arc<DualCacheFF<usize, ()>>,
+    pub hot_index: Arc<DualCacheFF<(u32, usize), ()>>,
     pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
     pub storage: Arc<Storage>,
     pub workers: Arc<AtomicPtr<WorkerNode>>,

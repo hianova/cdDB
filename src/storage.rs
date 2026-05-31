@@ -70,6 +70,8 @@ pub struct Storage {
     pub current_offset: crate::platform::Mutex<u64>,
     #[cfg(feature = "std")]
     pub writer: crate::platform::Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+    #[cfg(feature = "std")]
+    pub mmap: crate::platform::Mutex<Option<alloc::sync::Arc<memmap2::Mmap>>>,
 }
 
 impl Storage {
@@ -96,6 +98,8 @@ impl Storage {
             current_offset: crate::platform::Mutex::new(0),
             #[cfg(feature = "std")]
             writer,
+            #[cfg(feature = "std")]
+            mmap: crate::platform::Mutex::new(None),
         };
         storage.rebuild_disk_index();
         storage
@@ -213,18 +217,73 @@ impl Storage {
 
     /// 讀取實體
     pub fn read_entity(&self, entity_id: usize) -> Result<EntityData, String> {
-        let path = format!("{}/entities.bin", self.base_path);
         let (offset, len) = {
             #[cfg(feature = "std")]
             let index = self.disk_index.lock().unwrap();
             #[cfg(not(feature = "std"))]
             let index = self.disk_index.lock();
-            index.get(&entity_id).copied()
-        }.ok_or_else(|| "Entity not found on disk".to_string())?;
-
-        let bytes = self.fs.read_range(&path, offset + 4, len as usize)?;
-        EntityData::decode(&bytes)
-            .ok_or_else(|| "Decode Failed".to_string())
+            *index.get(&entity_id).ok_or("Not found in disk index")?
+        };
+        let path = format!("{}/entities.bin", self.base_path);
+        
+        #[cfg(feature = "std")]
+        {
+            let mut remap_needed = false;
+            let mmap_opt = {
+                let lock = self.mmap.lock().unwrap();
+                if let Some(m) = lock.as_ref() {
+                    if (offset + len as u64 + 4) <= m.len() as u64 {
+                        Some(m.clone())
+                    } else {
+                        remap_needed = true;
+                        None
+                    }
+                } else {
+                    remap_needed = true;
+                    None
+                }
+            };
+            
+            let mmap = if remap_needed {
+                if let Ok(mut w) = self.writer.lock() {
+                    if let Some(writer) = w.as_mut() {
+                        use std::io::Write;
+                        let _ = writer.flush();
+                    }
+                }
+                let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+                let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| e.to_string())?;
+                let arc_mmap = alloc::sync::Arc::new(mmap);
+                let mut lock = self.mmap.lock().unwrap();
+                *lock = Some(arc_mmap.clone());
+                arc_mmap
+            } else {
+                mmap_opt.unwrap()
+            };
+            
+            let buf = &mmap[offset as usize..(offset + len as u64 + 4) as usize];
+            if buf.len() < 4 {
+                return Err("Truncated".to_string());
+            }
+            let data_len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+            if buf.len() < 4 + data_len {
+                return Err("Truncated".to_string());
+            }
+            EntityData::decode(&buf[4..4+data_len]).ok_or("Decode failed".to_string())
+        }
+        
+        #[cfg(not(feature = "std"))]
+        {
+            let bytes = self.fs.read_range(&path, offset, len as usize + 4)?;
+            if bytes.len() < 4 {
+                return Err("Truncated record".to_string());
+            }
+            let data_len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+            if bytes.len() < 4 + data_len {
+                return Err("Truncated record data".to_string());
+            }
+            EntityData::decode(&bytes[4..4+data_len]).ok_or("Failed to decode".to_string())
+        }
     }
 
     /// 塊狀讀取
@@ -240,5 +299,88 @@ impl Storage {
             }
         }
         block_data
+    }
+
+    /// Background Compaction
+    pub fn compact(&self) -> Result<(), String> {
+        #[cfg(feature = "std")]
+        {
+            let path = format!("{}/entities.bin", self.base_path);
+            let tmp_path = format!("{}/entities.bin.tmp", self.base_path);
+            
+            let (active_ids, original_offset) = {
+                let index = self.disk_index.lock().unwrap();
+                let off = *self.current_offset.lock().unwrap();
+                (index.clone(), off)
+            };
+
+            let mut tmp_writer = std::io::BufWriter::with_capacity(
+                64 * 1024,
+                std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?
+            );
+            
+            let mut new_index = AHashMap::default();
+            let mut new_offset: u64 = 0;
+
+            for (&id, &(off, len)) in active_ids.iter() {
+                if off >= original_offset { continue; }
+                if let Ok(bytes) = self.fs.read_range(&path, off, len as usize + 4) {
+                    use std::io::Write;
+                    tmp_writer.write_all(&bytes).map_err(|e| e.to_string())?;
+                    new_index.insert(id, (new_offset, len));
+                    new_offset += bytes.len() as u64;
+                }
+            }
+
+            // Phase 2: Lock and merge deltas
+            let mut index_lock = self.disk_index.lock().unwrap();
+            let mut offset_lock = self.current_offset.lock().unwrap();
+            let mut writer_lock = self.writer.lock().unwrap();
+            
+            let mut delta_ids = Vec::new();
+            for (&id, &(off, len)) in index_lock.iter() {
+                if off >= original_offset {
+                    delta_ids.push((id, off, len));
+                }
+            }
+            
+            delta_ids.sort_by_key(|&(_, off, _)| off);
+            
+            if let Some(w) = writer_lock.as_mut() {
+                use std::io::Write;
+                let _ = w.flush();
+            }
+
+            for (id, off, len) in delta_ids {
+                if let Ok(bytes) = self.fs.read_range(&path, off, len as usize + 4) {
+                    use std::io::Write;
+                    tmp_writer.write_all(&bytes).map_err(|e| e.to_string())?;
+                    new_index.insert(id, (new_offset, len));
+                    new_offset += bytes.len() as u64;
+                }
+            }
+
+            use std::io::Write;
+            tmp_writer.flush().map_err(|e| e.to_string())?;
+            tmp_writer.get_ref().sync_all().map_err(|e| e.to_string())?;
+
+            *writer_lock = None;
+            let _ = std::fs::rename(&tmp_path, &path);
+            
+            *writer_lock = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .write(true)
+                .open(&path)
+                .ok()
+                .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
+                
+            *index_lock = new_index;
+            *offset_lock = new_offset;
+            
+            let mut mmap_lock = self.mmap.lock().unwrap();
+            *mmap_lock = None;
+        }
+        Ok(())
     }
 }

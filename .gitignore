@@ -1,7 +1,5 @@
 /target
 TODO.md
-benches/data
-tests/data/
-.DS_Store
-data/
-ops_data/
+dhat-heap.json
+scratch.rs
+*.rlib
