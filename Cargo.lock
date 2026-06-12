@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "cdDB"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ahash",
  "criterion",
@@ -285,9 +285,9 @@ dependencies = [
 
 [[package]]
 name = "dualcache-ff"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "472c939d7a59a275cf537d766dd9f89dce78dfff52e217a8c2eae088f02920f8"
+checksum = "fc03add4b1537ef830e496fe135a7524c5d0883a52f63cefc59076bed8b9c8ad"
 dependencies = [
  "ahash",
  "loom",

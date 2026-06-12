@@ -31,7 +31,7 @@ Add `cdDB` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cdDB = "0.4.0"
+cdDB = "0.4.1"
 ```
 
 ### Basic Usage (Synchronous)

@@ -420,4 +420,9 @@ impl<const N: usize> PartitionRoute<N> {
         let q = Query::new(self);
         q.execute_with_cb(nodes, cb);
     }
+
+    /// Trigger a synchronous WAL flush to durable storage
+    pub fn flush_wal(&self) -> Result<(), String> {
+        self.wal.checkpoint()
+    }
 }
