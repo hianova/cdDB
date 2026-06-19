@@ -88,25 +88,39 @@ impl<V> IntoIterator for Attributes<V> {
 /// 寫入指令列舉 (持久化用)
 #[derive(Clone, Debug)]
 pub enum WriteCommand {
+    /// Insert a standard entity with dynamically typed attributes.
     Insert {
+        /// The entity ID to insert.
         entity_id: usize,
+        /// String attributes.
         attributes: Attributes<String>,
+        /// Integer attributes.
         attributes_int: Attributes<u32>,
+        /// Blob attributes.
         attributes_blob: Attributes<Vec<u8>>,
     },
+    /// Batch insert multiple standard entities.
     BatchInsert(Vec<(usize, Attributes<String>, Attributes<u32>, Attributes<Vec<u8>>)>),
+    /// Delete an entity.
     Delete {
+        /// The entity ID to delete.
         entity_id: usize,
     },
+    /// Fast insertion path, skipping dynamic attributes parsing.
     InsertFast {
+        /// The entity ID to insert.
         entity_id: usize,
+        /// Fast insertion epoch tracking.
         epoch: u32,
+        /// The specific type of the record.
         record_type: u32,
+        /// The raw payload bytes.
         payload: alloc::sync::Arc<Vec<u8>>,
     },
 }
 
 impl WriteCommand {
+    /// Helper function to create an Insert command from typed attributes.
     pub fn insert(
         entity_id: usize,
         typed_attrs: AHashMap<String, ColumnValue>,
@@ -131,6 +145,7 @@ impl WriteCommand {
         }
     }
 
+    /// Encodes the command into a byte buffer for WAL persistence.
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
@@ -188,6 +203,7 @@ impl WriteCommand {
         buf
     }
 
+    /// Decodes a command from a byte buffer.
     pub fn decode(buf: &[u8]) -> Option<Self> {
         let mut pos = 0;
         let type_id = *buf.get(pos)?;
@@ -273,7 +289,9 @@ impl WriteCommand {
     }
 }
 
+/// Generic trait for sending responses back from background operations.
 pub trait ResponseSender<T>: Send + Sync {
+    /// Send the value through the response channel.
     fn send(&self, val: T) -> Result<(), String>;
 }
 
@@ -286,11 +304,16 @@ impl<T: Send + 'static> ResponseSender<T> for std::sync::mpsc::SyncSender<T> {
 
 /// 內部指令列舉 (同步溝通用)
 pub enum PartitionCommand {
+    /// A regular write command (Insert/Delete).
     Write(WriteCommand),
+    /// Load an entity synchronously from disk into memory.
     InternalLoad {
+        /// The ID of the entity to load.
         entity_id: usize,
+        /// The callback channel for the response.
         response_tx: alloc::boxed::Box<dyn ResponseSender<Option<MultiVectorPointer>>>,
     },
+    /// Shutdown the partition thread cleanly.
     Shutdown,
 }
 
@@ -309,23 +332,36 @@ impl core::fmt::Debug for PartitionCommand {
 /// IT Operations Log Levels
 #[derive(Debug, Clone)]
 pub enum LogLevel {
+    /// Information level.
     Info,
+    /// Warning level.
     Warn,
+    /// Error level.
     Error,
+    /// Fatal level.
     Fatal,
+    /// Debug level.
     Debug,
 }
 
 /// A structured record for IT Operations (Monitoring, Logging, etc.)
 #[derive(Debug, Clone)]
 pub struct ITOpsRecord {
+    /// Unix timestamp of the event.
     pub timestamp: u64,
+    /// Name of the service generating the log.
     pub service: String,
+    /// Node identifier.
     pub node: String,
+    /// Severity level of the log.
     pub level: LogLevel,
+    /// Log message content.
     pub message: String,
+    /// CPU usage snapshot (0.0 to 1.0).
     pub cpu_usage: f32, // 0.0 - 1.0
+    /// Memory usage snapshot (0.0 to 1.0).
     pub mem_usage: f32, // 0.0 - 1.0
+    /// API response time in milliseconds.
     pub response_time_ms: u32,
 }
 
@@ -351,6 +387,7 @@ impl ITOpsRecord {
 
 /// Extension trait for easier ITOps data ingestion
 pub trait ITOpsIngest {
+    /// Converts and inserts an operations record as a WriteCommand.
     fn insert_ops_record(&self, entity_id: usize, record: ITOpsRecord) -> crate::commands::WriteCommand;
 }
 

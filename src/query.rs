@@ -14,56 +14,94 @@ use crate::commands::PartitionCommand;
 #[derive(Debug, Clone)]
 pub enum QueryNode<'a> {
     /// 精準取值
-    Get { entity_id: usize, attr: &'a str },
+    Get { 
+        /// The entity ID to get.
+        entity_id: usize, 
+        /// The attribute name.
+        attr: &'a str 
+    },
     /// 跨陣列跳轉 (目前限於同分區內)
     Link {
+        /// The entity ID to start from.
         from_entity_id: usize,
+        /// The link attribute name.
         link_attr: &'a str,
+        /// The target attribute name.
         target_attr: &'a str,
     },
     /// 範圍取值
     Range {
-        entity_id: usize, // 起始 ID
+        /// 起始 ID (Starting entity ID)
+        entity_id: usize, 
+        /// The attribute name.
         attr: &'a str,
+        /// The number of items to read.
         len: usize,
     },
     /// 全域掃描 (Vectorized Scan)
-    Scan { attr: &'a str },
+    Scan { 
+        /// The attribute name to scan.
+        attr: &'a str 
+    },
     /// 聚合計算 (Vectorized Aggregate)
     Aggregate {
+        /// The attribute name to aggregate.
         attr: &'a str,
+        /// The aggregation operation.
         op: AggregateOp,
     },
 }
 
+/// Supported aggregation operations.
 #[derive(Debug, Clone)]
 pub enum AggregateOp {
+    /// Calculate the sum.
     Sum,
+    /// Calculate the average.
     Avg,
+    /// Find the minimum value.
     Min,
+    /// Find the maximum value.
     Max,
+    /// Count the total number of elements.
     Count,
 }
 
+/// Represents a complete query composed of multiple query nodes.
 #[derive(Debug, Clone)]
 pub struct CdDbQuery<'a> {
+    /// The sequence of operations to perform.
     pub nodes: Vec<QueryNode<'a>>,
 }
 
+/// The output of a query node operation.
 #[derive(Debug, Clone)]
 pub enum QueryResult<'a> {
+    /// String result.
     Str(String),
+    /// Integer result.
     Int(u32),
+    /// Blob result.
     Blob(Vec<u8>),
+    /// Range of integers.
     IntRange(&'a [u32]),
+    /// Sum of integers.
     IntSum(u64),
+    /// Average of integers.
     IntAvg(f64),
+    /// Minimum integer.
     IntMin(u32),
+    /// Maximum integer.
     IntMax(u32),
+    /// Count result.
     Count(usize),
+    /// List of integers.
     IntList(&'a [u32]),
+    /// List of strings.
     StrList(&'a [&'a str]),
+    /// List of blobs.
     BlobList(&'a [&'a [u8]]),
+    /// No result.
     None,
 }
 
@@ -84,11 +122,13 @@ impl<T: Clone> Bump<T> {
     }
 }
 
+/// A query executor bound to a specific partition and QSBR worker thread.
 pub struct Query<'a, const N: usize> {
     route: &'a PartitionRoute<N>,
     worker: Arc<WorkerState>,
 }
 
+/// An active query session that holds arena allocators and a pin on the worker state.
 pub struct QuerySession<'a, const N: usize> {
     route: &'a PartitionRoute<N>,
     worker: &'a WorkerState,
@@ -98,15 +138,18 @@ pub struct QuerySession<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> Query<'a, N> {
+    /// Create a new `Query` bound to the given partition route.
     pub fn new(route: &'a PartitionRoute<N>) -> Self {
         let worker = route.register_worker();
         Self { route, worker }
     }
 
+    /// Obtain an active `QuerySession` to execute queries under the current QSBR pin.
     pub fn session(&self) -> QuerySession<'_, N> {
         QuerySession::new(self.route, &self.worker)
     }
 
+    /// Execute a batch of query nodes, invoking the callback for each result.
     pub fn execute_with_cb<'b, F>(&self, nodes: &[QueryNode<'b>], cb: F)
     where
         F: FnMut(QueryResult<'_>),
@@ -114,20 +157,24 @@ impl<'a, const N: usize> Query<'a, N> {
         self.session().execute_with_cb(nodes, cb);
     }
 
+    /// Helper: Execute a single get_int query.
     pub fn get_int(&self, entity_id: usize, attr: &str) -> Option<u32> {
         self.session().get_int(entity_id, attr)
     }
 
+    /// Helper: Execute a single get_str query.
     pub fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
         self.session().get_str(entity_id, attr)
     }
 
+    /// Helper: Execute a single get_blob query.
     pub fn get_blob(&self, entity_id: usize, attr: &str) -> Option<Vec<u8>> {
         self.session().get_blob(entity_id, attr)
     }
 }
 
 impl<'a, const N: usize> QuerySession<'a, N> {
+    /// Create a new `QuerySession` from a route and worker state.
     pub fn new(route: &'a PartitionRoute<N>, worker: &'a WorkerState) -> Self {
         worker.enter();
         Self { 
@@ -139,6 +186,7 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         }
     }
 
+    /// Execute a batch of query nodes and invoke the callback with results.
     pub fn execute_with_cb<'b, F>(&self, nodes: &[QueryNode<'b>], mut cb: F)
     where
         F: FnMut(QueryResult),
@@ -293,6 +341,7 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         }
     }
 
+    /// Fetch a string attribute for an entity.
     pub fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
         if let Some(ptr) = self.get_pointer(entity_id)
             && let Some(&idx) = ptr.attribute_indices.get(attr) {
@@ -304,6 +353,7 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         None
     }
 
+    /// Fetch an integer attribute for an entity.
     pub fn get_int(&self, entity_id: usize, attr: &str) -> Option<u32> {
         if let Some(ptr) = self.get_pointer(entity_id)
             && let Some(&idx) = ptr.attribute_indices.get(attr) {
@@ -315,6 +365,7 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         None
     }
 
+    /// Fetch a blob attribute for an entity.
     pub fn get_blob(&self, entity_id: usize, attr: &str) -> Option<Vec<u8>> {
         if let Some(ptr) = self.get_pointer(entity_id)
             && let Some(&idx) = ptr.attribute_indices.get(attr) {
@@ -394,11 +445,13 @@ impl<'a, const N: usize> Drop for QuerySession<'a, N> {
 }
 
 impl<'a, const N: usize> Query<'a, N> {
+    /// Seed the bloom filter with a specific entity ID.
     pub fn seed_bloom_filter(&self, entity_id: usize) {
         let bloom = crate::unsafe_core::load_ref(&self.route.bloom_filter);
         bloom.insert(&entity_id);
     }
 
+    /// Calculate the sum of an integer attribute over a range of entity IDs.
     pub fn sum_int_range(&self, attr: &str, start_idx: usize, len: usize) -> Option<u64> {
         self.route.get_column_int(attr, &self.worker).map(|col| {
             col.with_data(&self.worker, |data| {

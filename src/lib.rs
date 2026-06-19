@@ -86,6 +86,10 @@ mod dualcache_stub {
             }
         }
 
+        pub fn new_headless(_config: Config) -> (Self, ()) {
+            (Self::new(_config), ())
+        }
+
         pub fn insert(&self, _key: K, _value: V) {}
         pub fn remove(&self, _key: &K) -> Option<V> {
             None

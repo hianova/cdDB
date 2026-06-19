@@ -25,26 +25,40 @@ pub struct MultiVectorPointer {
 }
 
 /// 3. 分區/群組 (Partition / Group)
+/// Represents a single database partition processing thread and state.
 pub struct Partition<const N: usize> {
+    /// Backing columns array.
     pub columns: Arc<AtomicPtr<Columns<N>>>,
+    /// Thread-safe pointers to vector snapshots.
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
+    /// Receiver channel for incoming commands.
     pub writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
+    /// Quiescent State Based Reclamation (QSBR) manager.
     pub qsbr: QsbrManager,
 
     // 持久層與快照
+    /// Storage layer instance for this partition.
     pub storage: Arc<Storage>,
+    /// Heat tracking cache for hot entities.
     pub hot_index: Arc<DualCacheFF<(u32, usize), ()>>, // Just for heat tracking
+    /// The unique numeric ID of this partition.
     pub partition_id: u32,
+    /// Thread-safe pointer to the Bloom filter.
     pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
 
     // WAL 支援
+    /// Write-Ahead Log provider.
     pub wal: Arc<dyn WalProvider>,
+    /// Count of items in the Bloom filter.
     pub bloom_count: usize,
+    /// Total number of bits in the Bloom filter.
     pub bloom_bits: usize,
+    /// File system abstraction.
     pub fs: Arc<dyn FileSystem>,
 }
 
 impl<const N: usize> Partition<N> {
+    /// Creates a new `Partition` worker instance.
     pub fn new(
         writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
         columns: Arc<AtomicPtr<Columns<N>>>,
@@ -112,6 +126,7 @@ impl<const N: usize> Partition<N> {
         self.bloom_count = count;
     }
 
+    /// Runs the partition's event loop, processing write commands from the channel.
     pub fn run(mut self) {
         #[cfg(feature = "std")]
         {
@@ -315,6 +330,7 @@ impl<const N: usize> Partition<N> {
         let _ = self.wal.append(cmd);
     }
 
+    /// Replays the write-ahead log to reconstruct partition state during startup.
     pub fn replay_wal(&mut self) {
         if let Ok(bytes) = self.wal.read_all() {
             let mut pos = 0;

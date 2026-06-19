@@ -28,32 +28,77 @@ use crate::commands::{PartitionCommand, WriteCommand};
 
 /// 4. cdDB 全域入口與調度器 (Dispatcher)
 pub struct CdDBDispatcher<const N: usize> {
+    /// A mapping from partition names to their route contexts.
     pub route_table: AHashMap<String, Arc<PartitionRoute<N>>>,
+    /// The base directory path for storage.
     pub base_path: Option<String>,
+    /// Thread-safe pointer to the linked list of active worker nodes (QSBR).
     pub workers: Arc<AtomicPtr<WorkerNode>>,
+    /// File system abstraction for storage operations.
     pub fs: Arc<dyn FileSystem>,
+    /// Executor for spawning background tasks (e.g. partition threads).
     pub executor: Arc<dyn Executor>,
+    /// A global memory cache shared across partitions.
     pub global_cache: Arc<DualCacheFF<(u32, usize), ()>>,
+    /// Counter to generate unique IDs for new partitions.
     pub next_partition_id: u32,
+    /// Active daemon thread join handle for the global cache (if running).
+    #[cfg(feature = "std")]
+    #[cfg(feature = "dualcache-ff")]
+    pub daemon_handle: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// Cached config used to re-create the daemon thread on wake.
+    #[cfg(feature = "std")]
+    #[cfg(feature = "dualcache-ff")]
+    pub cache_config: Config,
 }
 
 impl<const N: usize> CdDBDispatcher<N> {
+    /// Create a new `CdDBDispatcher` with a custom file system and executor.
     pub fn new(
         base_path: Option<String>,
         fs: Arc<dyn FileSystem>,
         executor: Arc<dyn Executor>,
     ) -> Self {
+        #[cfg(feature = "dualcache-ff")]
+        let cache_config = Config::with_memory_budget(100, 60);
+
+        #[cfg(feature = "dualcache-ff")]
+        let (global_cache, daemon) = DualCacheFF::new_headless(cache_config);
+
+        #[cfg(feature = "dualcache-ff")]
+        #[cfg(feature = "std")]
+        let daemon_handle = {
+            let handle = std::thread::spawn(move || {
+                daemon.run();
+            });
+            Arc::new(std::sync::Mutex::new(Some(handle)))
+        };
+
+        #[cfg(feature = "dualcache-ff")]
+        #[cfg(not(feature = "std"))]
+        let _ = daemon;
+
+        #[cfg(not(feature = "dualcache-ff"))]
+        let global_cache = DualCacheFF::new(Config);
+
         Self {
             route_table: AHashMap::default(),
             base_path,
             workers: Arc::new(crate::sync::atomic::AtomicPtr::new(core::ptr::null_mut())),
             fs,
             executor,
-            global_cache: Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60))),
+            global_cache: Arc::new(global_cache),
             next_partition_id: 0,
+            #[cfg(feature = "std")]
+            #[cfg(feature = "dualcache-ff")]
+            daemon_handle,
+            #[cfg(feature = "std")]
+            #[cfg(feature = "dualcache-ff")]
+            cache_config,
         }
     }
 
+    /// Create a new `CdDBDispatcher` using the standard library's file system and executor.
     #[cfg(feature = "std")]
     pub fn new_std(base_path: Option<String>) -> Self {
         Self::new(
@@ -63,11 +108,13 @@ impl<const N: usize> CdDBDispatcher<N> {
         )
     }
 
+    /// Register a new partition with the given path, using the default synchronous WAL.
     #[cfg(feature = "std")]
     pub fn register_partition(&mut self, path: String) -> UserWriter {
         self.register_partition_with_wal(path, None, crate::wal::WalMode::Sync)
     }
 
+    /// Register a new partition with a specific memory budget.
     #[cfg(feature = "std")]
     pub fn register_partition_with_budget(
         &mut self,
@@ -77,6 +124,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         self.register_partition_with_wal(path, None, crate::wal::WalMode::Sync)
     }
 
+    /// Register a new partition, specifying a custom WAL path and mode.
     #[cfg(feature = "std")]
     pub fn register_partition_with_wal(
         &mut self,
@@ -92,6 +140,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         self.register_partition_with_wal_provider(path, wal)
     }
 
+    /// Register a new partition with a custom `WalProvider`.
     #[cfg(feature = "std")]
     pub fn register_partition_with_wal_provider(
         &mut self,
@@ -216,6 +265,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         }));
     }
 
+    /// Get the route context for a partition by name, allowing queries to be executed.
     pub fn get_route(&self, partition_name: &str) -> Option<Arc<PartitionRoute<N>>> {
         self.route_table.get(partition_name).cloned()
     }
@@ -268,6 +318,85 @@ impl<const N: usize> CdDBDispatcher<N> {
             None
         }
     }
+
+    /// Puts all background maintenance and flusher daemons to sleep (hibernation).
+    /// This stops any background threads (e.g. WAL flusher, global cache daemon)
+    /// to save power when the application is idle or suspended.
+    pub fn sleep(&self) {
+        // 1. Pause WAL flusher threads across all registered partitions
+        for route in self.route_table.values() {
+            route.wal.pause();
+        }
+
+        // 2. Shut down the global cache daemon thread (if any is running)
+        #[cfg(feature = "std")]
+        #[cfg(feature = "dualcache-ff")]
+        {
+            let mut handle_lock = self.daemon_handle.lock().unwrap();
+            if handle_lock.is_some() {
+                // Send shutdown signal to the daemon
+                let _ = self.global_cache.cmd_tx.try_send(dualcache_ff::daemon::Command::Shutdown);
+                if let Some(handle) = handle_lock.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+    }
+
+    /// Wakes up all background maintenance and flusher daemons from sleep.
+    /// This restarts any background threads (e.g. WAL flusher, global cache daemon)
+    /// to resume normal high-performance operation.
+    pub fn wake(&self) {
+        // 1. Resume WAL flusher threads across all registered partitions
+        for route in self.route_table.values() {
+            route.wal.resume();
+        }
+
+        // 2. Restart the global cache daemon thread (if stopped)
+        #[cfg(feature = "std")]
+        #[cfg(feature = "dualcache-ff")]
+        {
+            let mut handle_lock = self.daemon_handle.lock().unwrap();
+            if handle_lock.is_none() {
+                let daemon = dualcache_ff::Daemon::new(
+                    self.global_cache.hasher.clone(),
+                    self.cache_config.capacity,
+                    self.global_cache.t1.clone(),
+                    self.global_cache.t2.clone(),
+                    self.global_cache.cache.clone(),
+                    self.global_cache.cmd_tx.clone(),
+                    self.global_cache.hit_tx.clone(),
+                    self.global_cache.epoch.clone(),
+                    self.cache_config.duration,
+                    self.cache_config.poll_us,
+                    self.global_cache.worker_states.clone(),
+                    self.global_cache.daemon_tick.clone(),
+                    self.global_cache.is_cold_start.clone(),
+                );
+                let handle = std::thread::spawn(move || {
+                    daemon.run();
+                });
+                *handle_lock = Some(handle);
+            }
+        }
+    }
+}
+
+impl<const N: usize> Drop for CdDBDispatcher<N> {
+    fn drop(&mut self) {
+        #[cfg(feature = "std")]
+        #[cfg(feature = "dualcache-ff")]
+        {
+            if let Ok(mut handle_lock) = self.daemon_handle.lock() {
+                if handle_lock.is_some() {
+                    let _ = self.global_cache.cmd_tx.try_send(dualcache_ff::daemon::Command::Shutdown);
+                    if let Some(handle) = handle_lock.take() {
+                        let _ = handle.join();
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(feature = "std")]
@@ -277,10 +406,12 @@ impl<const N: usize> Default for CdDBDispatcher<N> {
     }
 }
 
+/// A writer interface to send write commands to a specific partition.
 #[cfg(feature = "std")]
 pub struct UserWriter(Arc<BoundedQueue<PartitionCommand>>);
 #[cfg(feature = "std")]
 impl UserWriter {
+    /// Send a write command to the partition asynchronously (blocking with backoff if full).
     pub fn send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
         let mut cmd = PartitionCommand::Write(cmd);
         let mut backoff = crate::platform::Backoff::new();
@@ -298,6 +429,7 @@ impl UserWriter {
             }
         }
     }
+    /// Try to send a write command to the partition immediately, returning an error if the queue is full.
     pub fn try_send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
         self.0.push(PartitionCommand::Write(cmd)).map_err(|_| "Full")
     }
@@ -314,28 +446,42 @@ impl Drop for UserWriter {
     }
 }
 
+/// The route context for a partition, used to dispatch commands and queries.
 #[derive(Clone)]
 pub struct PartitionRoute<const N: usize> {
+    /// The name of the partition.
     pub name: String,
+    /// The unique numeric ID of the partition.
     pub partition_id: u32,
+    /// The command queue sender for writing to this partition.
     #[cfg(feature = "std")]
     pub writer_tx: Arc<BoundedQueue<PartitionCommand>>,
+    /// The command queue sender for writing to this partition (no_std).
     #[cfg(not(feature = "std"))]
     pub writer_tx: Arc<dyn crate::platform::MessageSender>,
+    /// Thread-safe pointer to the partition's column arrays.
     pub columns: Arc<AtomicPtr<Columns<N>>>,
+    /// Thread-safe pointer to the partition's shared vector pointers.
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
+    /// Shared global hot index cache.
     pub hot_index: Arc<DualCacheFF<(u32, usize), ()>>,
+    /// Thread-safe pointer to the partition's bloom filter.
     pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
+    /// The underlying storage engine instance for this partition.
     pub storage: Arc<Storage>,
+    /// Thread-safe pointer to the active worker nodes in QSBR.
     pub workers: Arc<AtomicPtr<WorkerNode>>,
+    /// The write-ahead log provider for this partition.
     pub wal: Arc<dyn WalProvider>,
 }
 
 impl<const N: usize> PartitionRoute<N> {
+    /// Get a point-in-time snapshot of the shared multi-vector pointers for safe reading.
     pub fn get_snapshot(&self) -> AHashMap<usize, MultiVectorPointer> {
         crate::unsafe_core::load_clone(&self.shared_pointers)
     }
 
+    /// Register a new QSBR worker thread and return its state tracker.
     pub fn register_worker(&self) -> Arc<WorkerState> {
         let worker = Arc::new(WorkerState::new());
         let new_node = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(crate::qsbr::WorkerNode {

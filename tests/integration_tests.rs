@@ -677,7 +677,7 @@ mod it {
         
             // Phase 1: Create DB and write data
             {
-                let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
+                let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
                 let tx = db.register_partition_with_wal(
                     "test_wal".to_string(),
                     Some(wal_path.to_string_lossy().into_owned()),
@@ -708,7 +708,7 @@ mod it {
         
             // Phase 2: Create a new DB and replay WAL
             {
-                let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(None);
+                let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
                 // The act of registering with an existing WAL path will trigger `replay_wal`
                 let _tx = db.register_partition_with_wal(
                     "test_wal".to_string(),
@@ -733,4 +733,67 @@ mod it {
         }
     }
 
+    mod sleep_wake_test {
+        use cdDB::{CdDBDispatcher, WriteCommand, Attributes};
+        use std::thread;
+
+        #[test]
+        fn test_sleep_wake() {
+            let _temp_dir = tempfile::tempdir().unwrap();
+            let tmp = _temp_dir.path().to_path_buf();
+            let mut db: CdDBDispatcher<1024> = CdDBDispatcher::new_std(Some(tmp.to_string_lossy().into_owned()));
+            let tx = db.register_partition_with_wal(
+                "test_sleep".to_string(),
+                None,
+                cdDB::wal::WalMode::Async100ms,
+            );
+
+            // 1. Initial write
+            let mut attrs_int = Attributes::new();
+            attrs_int.insert("val".to_string(), 100);
+            let cmd = WriteCommand::Insert {
+                entity_id: 1,
+                attributes: Attributes::new(),
+                attributes_int: attrs_int,
+                attributes_blob: Attributes::new(),
+            };
+            tx.send(cmd).unwrap();
+
+            let route = db.get_route("test_sleep").unwrap();
+            let worker = route.register_worker();
+            while route.len(&worker) < 1 {
+                thread::yield_now();
+            }
+
+            // 2. Put to sleep
+            db.sleep();
+
+            // 3. Write during sleep (should be buffered/delayed)
+            let mut attrs_int2 = Attributes::new();
+            attrs_int2.insert("val".to_string(), 200);
+            let cmd2 = WriteCommand::Insert {
+                entity_id: 2,
+                attributes: Attributes::new(),
+                attributes_int: attrs_int2,
+                attributes_blob: Attributes::new(),
+            };
+            tx.send(cmd2).unwrap();
+
+            // Give it some time (should still not be committed in WAL thread because flusher is paused)
+            thread::sleep(std::time::Duration::from_millis(150));
+
+            // 4. Wake up
+            db.wake();
+
+            // After wake, it should be processed and committed
+            while route.len(&worker) < 2 {
+                thread::yield_now();
+            }
+
+            let q = cdDB::Query::new(&route);
+            let session = q.session();
+            assert_eq!(session.get_int(1, "val"), Some(100));
+            assert_eq!(session.get_int(2, "val"), Some(200));
+        }
+    }
 }
