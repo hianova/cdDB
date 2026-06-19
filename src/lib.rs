@@ -62,6 +62,11 @@ mod bloom;
 pub mod wal;
 #[cfg(not(feature = "dualcache-ff"))]
 mod dualcache_stub {
+    compile_error!("Stub is being compiled! Feature dualcache-ff is not enabled!");
+    ///
+    /// Note: The real `DualCacheFF` (when enabled) uses **asynchronous admission**. 
+    /// Calling `insert()` queues the item, and an immediate `get()` will return `None` 
+    /// until the background daemon processes the queue. This is intentional.
     #[derive(Clone, Debug)]
     pub struct DualCacheFF<K, V> {
         _marker: core::marker::PhantomData<(K, V)>,
@@ -90,10 +95,14 @@ mod dualcache_stub {
             (Self::new(_config), ())
         }
 
+        /// Stub `insert`: Does nothing.
+        /// (In the real `DualCacheFF`, this asynchronously queues the item).
         pub fn insert(&self, _key: K, _value: V) {}
         pub fn remove(&self, _key: &K) -> Option<V> {
             None
         }
+        /// Stub `get`: Always returns `None`.
+        /// (In the real `DualCacheFF`, an immediate `get` after `insert` may also return `None` due to async admission).
         pub fn get(&self, _key: &K) -> Option<&V> {
             None
         }
@@ -116,7 +125,7 @@ pub use platform::FileSystem;
 
 #[cfg(feature = "dualcache-ff")]
 #[cfg(feature = "std")]
-pub use dualcache_ff::{DualCacheFF, Config};
+pub use dualcache_ff::{DualCacheFF, Config, daemon};
 
 #[cfg(feature = "dualcache-ff")]
 #[cfg(not(feature = "std"))]
