@@ -28,10 +28,6 @@ pub trait WalProvider: Send + Sync {
     fn checkpoint(&self) -> Result<(), String>;
     /// Reads all entries from the log into a raw byte vector.
     fn read_all(&self) -> Result<Vec<u8>, String>;
-    /// Pauses background processing.
-    fn pause(&self) {}
-    /// Resumes background processing.
-    fn resume(&self) {}
 }
 
 /// A no-operation WAL provider useful for read-only partitions or volatile stores.
@@ -60,9 +56,6 @@ pub struct StdWal {
     /// Condvar for waking up the async flusher thread.
     #[cfg(feature = "std")]
     pub condvar: Arc<std::sync::Condvar>,
-    /// Pause flag for the async flusher.
-    #[cfg(feature = "std")]
-    pub paused: Arc<core::sync::atomic::AtomicBool>,
 }
 
 impl StdWal {
@@ -82,20 +75,18 @@ impl StdWal {
             let writer = Arc::new(crate::sync::Mutex::new(file_opt));
             let async_buffer = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::with_capacity(10000)));
             let condvar = Arc::new(std::sync::Condvar::new());
-            let paused = Arc::new(core::sync::atomic::AtomicBool::new(false));
 
             if mode == WalMode::Async100ms {
                 let bg_writer = Arc::clone(&writer);
                 let bg_buffer = Arc::clone(&async_buffer);
                 let bg_condvar = Arc::clone(&condvar);
-                let bg_paused = Arc::clone(&paused);
                 std::thread::spawn(move || {
                     let mut last_fsync = std::time::Instant::now();
                     loop {
                         let mut local_buf = Vec::<Vec<u8>>::new();
                         {
                             let mut lock = bg_buffer.lock().unwrap();
-                            while lock.is_empty() || bg_paused.load(core::sync::atomic::Ordering::Relaxed) {
+                            while lock.is_empty() {
                                 lock = bg_condvar.wait(lock).unwrap();
                             }
                             core::mem::swap(&mut local_buf, &mut *lock);
@@ -142,7 +133,6 @@ impl StdWal {
                 writer,
                 async_buffer,
                 condvar,
-                paused,
             }
         }
         #[cfg(not(feature = "std"))]
@@ -236,19 +226,6 @@ impl WalProvider for StdWal {
             }
         }
         self.fs.read(&self.path)
-    }
-
-    fn pause(&self) {
-        #[cfg(feature = "std")]
-        self.paused.store(true, core::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn resume(&self) {
-        #[cfg(feature = "std")]
-        {
-            self.paused.store(false, core::sync::atomic::Ordering::Relaxed);
-            self.condvar.notify_all();
-        }
     }
 }
 

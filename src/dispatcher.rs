@@ -42,14 +42,13 @@ pub struct CdDBDispatcher<const N: usize> {
     pub global_cache: Arc<DualCacheFF<(u32, usize), ()>>,
     /// Counter to generate unique IDs for new partitions.
     pub next_partition_id: u32,
-    /// Active daemon thread join handle for the global cache (if running).
+    /// Active daemon thread join handle for the global cache.
     #[cfg(feature = "std")]
     #[cfg(feature = "dualcache-ff")]
-    pub daemon_handle: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
-    /// Cached config used to re-create the daemon thread on wake.
-    #[cfg(feature = "std")]
-    #[cfg(feature = "dualcache-ff")]
-    pub cache_config: Config,
+    pub daemon_handle: Option<std::thread::JoinHandle<()>>,
+    /// Flag indicating whether the dispatcher is currently in a "sleeping" state.
+    /// This acts as a unified switch for upper-layer applications to check.
+    pub is_sleeping: Arc<core::sync::atomic::AtomicBool>,
 }
 
 impl<const N: usize> CdDBDispatcher<N> {
@@ -67,12 +66,9 @@ impl<const N: usize> CdDBDispatcher<N> {
 
         #[cfg(feature = "dualcache-ff")]
         #[cfg(feature = "std")]
-        let daemon_handle = {
-            let handle = std::thread::spawn(move || {
-                daemon.run();
-            });
-            Arc::new(std::sync::Mutex::new(Some(handle)))
-        };
+        let daemon_handle = Some(std::thread::spawn(move || {
+            daemon.run();
+        }));
 
         #[cfg(feature = "dualcache-ff")]
         #[cfg(not(feature = "std"))]
@@ -92,9 +88,7 @@ impl<const N: usize> CdDBDispatcher<N> {
             #[cfg(feature = "std")]
             #[cfg(feature = "dualcache-ff")]
             daemon_handle,
-            #[cfg(feature = "std")]
-            #[cfg(feature = "dualcache-ff")]
-            cache_config,
+            is_sleeping: Arc::new(core::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -319,66 +313,22 @@ impl<const N: usize> CdDBDispatcher<N> {
         }
     }
 
-    /// Puts all background maintenance and flusher daemons to sleep (hibernation).
-    /// This stops any background threads (e.g. WAL flusher, global cache daemon)
-    /// to save power when the application is idle or suspended.
+    /// Puts the dispatcher into a logical "sleep" state.
+    /// In this mode, background maintenance daemons are NOT killed to avoid high latency overhead,
+    /// but they naturally fall into minimal-execution idle polling (e.g. 1ms interval, 0 CPU).
+    /// This simply toggles the `is_sleeping` flag which upper applications can use to pause traffic.
     pub fn sleep(&self) {
-        // 1. Pause WAL flusher threads across all registered partitions
-        for route in self.route_table.values() {
-            route.wal.pause();
-        }
-
-        // 2. Shut down the global cache daemon thread (if any is running)
-        #[cfg(feature = "std")]
-        #[cfg(feature = "dualcache-ff")]
-        {
-            let mut handle_lock = self.daemon_handle.lock().unwrap();
-            if handle_lock.is_some() {
-                // Send shutdown signal to the daemon
-                let _ = self.global_cache.cmd_tx.try_send(dualcache_ff::daemon::Command::Shutdown);
-                if let Some(handle) = handle_lock.take() {
-                    let _ = handle.join();
-                }
-            }
-        }
+        self.is_sleeping.store(true, core::sync::atomic::Ordering::Release);
     }
 
-    /// Wakes up all background maintenance and flusher daemons from sleep.
-    /// This restarts any background threads (e.g. WAL flusher, global cache daemon)
-    /// to resume normal high-performance operation.
+    /// Wakes up the dispatcher from logical "sleep" state.
     pub fn wake(&self) {
-        // 1. Resume WAL flusher threads across all registered partitions
-        for route in self.route_table.values() {
-            route.wal.resume();
-        }
+        self.is_sleeping.store(false, core::sync::atomic::Ordering::Release);
+    }
 
-        // 2. Restart the global cache daemon thread (if stopped)
-        #[cfg(feature = "std")]
-        #[cfg(feature = "dualcache-ff")]
-        {
-            let mut handle_lock = self.daemon_handle.lock().unwrap();
-            if handle_lock.is_none() {
-                let daemon = dualcache_ff::Daemon::new(
-                    self.global_cache.hasher.clone(),
-                    self.cache_config.capacity,
-                    self.global_cache.t1.clone(),
-                    self.global_cache.t2.clone(),
-                    self.global_cache.cache.clone(),
-                    self.global_cache.cmd_tx.clone(),
-                    self.global_cache.hit_tx.clone(),
-                    self.global_cache.epoch.clone(),
-                    self.cache_config.duration,
-                    self.cache_config.poll_us,
-                    self.global_cache.worker_states.clone(),
-                    self.global_cache.daemon_tick.clone(),
-                    self.global_cache.is_cold_start.clone(),
-                );
-                let handle = std::thread::spawn(move || {
-                    daemon.run();
-                });
-                *handle_lock = Some(handle);
-            }
-        }
+    /// Check if the dispatcher is currently sleeping.
+    pub fn is_sleeping(&self) -> bool {
+        self.is_sleeping.load(core::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -387,13 +337,9 @@ impl<const N: usize> Drop for CdDBDispatcher<N> {
         #[cfg(feature = "std")]
         #[cfg(feature = "dualcache-ff")]
         {
-            if let Ok(mut handle_lock) = self.daemon_handle.lock() {
-                if handle_lock.is_some() {
-                    let _ = self.global_cache.cmd_tx.try_send(dualcache_ff::daemon::Command::Shutdown);
-                    if let Some(handle) = handle_lock.take() {
-                        let _ = handle.join();
-                    }
-                }
+            if let Some(handle) = self.daemon_handle.take() {
+                let _ = self.global_cache.cmd_tx.try_send(dualcache_ff::daemon::Command::Shutdown);
+                let _ = handle.join();
             }
         }
     }

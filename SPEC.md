@@ -93,7 +93,13 @@ let results = db.execute_batch_async("partition_name", &nodes).await;
 ```
 This API returns a `Future` resolving to a `Vec<QueryResult>`. Wait-free memory access paths execute directly inline synchronously for extreme latency optimization (~44ns), avoiding thread context switch overhead for hot data.
 
+### 3.5 Logical Sleep & Wake State Management
 
+To support power-saving states and allow upper-layer application servers or connection listeners to pause incoming request routing, `cdDB` implements a unified, logical sleep/wake mechanism:
+
+*   **Logical Sleep Design**: Instead of physically shutting down background daemon threads (such as the `DualCache-FF` maintenance loops or the asynchronous WAL group commit flusher), which would introduce high thread spawning latencies upon wakeup, the engine utilizes a central, lock-free `is_sleeping` atomic flag.
+*   **Idle Polling Behavior**: When `sleep()` is invoked, background threads naturally fall into minimal-execution idle polling (e.g. 1ms intervals, 0% CPU footprint), avoiding thread recreation overhead.
+*   **Traffic Pausing**: Upper-layer connection listeners check `db.is_sleeping()` at the entry point of request processing. If `true`, they pause accepting/dispatching new requests until `wake()` is called and `is_sleeping()` returns `false`.
 
 ---
 

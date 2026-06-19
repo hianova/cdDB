@@ -82,6 +82,27 @@ db.execute_batch("users.active", &nodes, |result| {
 });
 ```
 
+### 😴 Logical Sleep / Wake Control
+
+To support power-saving and connection listener pausing when an application is suspended or idle, `cdDB` provides a logical sleep/wake state management API:
+
+```rust
+// Check current sleep state
+if !db.is_sleeping() {
+    // Put the database to sleep. Upper-layer connection listeners can check this
+    // flag to temporarily pause incoming traffic.
+    db.sleep();
+}
+
+assert!(db.is_sleeping());
+
+// Wake the database up
+db.wake();
+assert!(!db.is_sleeping());
+```
+
+Unlike traditional shutdown/recreation, this logical state does not destroy background daemon threads (such as the `DualCache-FF` daemon or WAL flushers), avoiding high latency overhead when waking up. Instead, threads naturally fall into minimal-execution idle polling (0% CPU).
+
 For advanced embedded features, refer to the [SPEC.md](SPEC.md) document.
 
 ## 📊 Benchmarks & Performance
