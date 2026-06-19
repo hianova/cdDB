@@ -1,21 +1,3 @@
-#[cfg(not(feature = "std"))]
-pub use crate::unsafe_core::no_std_sync::Mutex;
-
-#[cfg(feature = "std")]
-pub use std::sync::Mutex;
-
-#[cfg(not(feature = "loom"))]
-pub mod atomic {
-    pub use core::sync::atomic::{AtomicUsize, AtomicPtr, AtomicBool, Ordering};
-    #[cfg(target_has_atomic = "64")]
-    pub use core::sync::atomic::AtomicU64;
-}
-
-#[cfg(feature = "loom")]
-pub mod atomic {
-    pub use loom::sync::atomic::{AtomicUsize, AtomicPtr, AtomicBool, Ordering};
-}
-
 
 use alloc::vec::Vec;
 use alloc::string::String;
@@ -90,11 +72,10 @@ impl FileSystem for StdFileSystem {
         let entries = std::fs::read_dir(path).map_err(|e: std::io::Error| e.to_string())?;
         let mut names = Vec::new();
         for entry in entries {
-            if let Ok(entry) = entry {
-                if let Ok(name) = entry.file_name().into_string() {
+            if let Ok(entry) = entry
+                && let Ok(name) = entry.file_name().into_string() {
                     names.push(name);
                 }
-            }
         }
         Ok(names)
     }
@@ -114,6 +95,12 @@ pub struct StdMessageQueue {
 
 pub struct Backoff {
     spins: u32,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Backoff {
@@ -154,7 +141,7 @@ impl MessageQueue for StdMessageQueue {
 #[cfg(feature = "std")]
 impl Executor for StdExecutor {
     fn spawn_task(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>) {
-        std::thread::spawn(move || f());
+        std::thread::spawn(f);
     }
 }
 
@@ -195,5 +182,65 @@ impl MessageSender for StdMessageSender {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_std_file_system() {
+        let fs = StdFileSystem;
+        let path = "test_fs.txt";
+        let _ = std::fs::remove_file(path);
+        fs.write(path, b"hello").unwrap();
+        assert!(fs.exists(path));
+        assert_eq!(fs.file_size(path).unwrap(), 5);
+        let content = fs.read(path).unwrap();
+        assert_eq!(content, b"hello");
+        fs.append(path, b" world").unwrap();
+        let content2 = fs.read(path).unwrap();
+        assert_eq!(content2, b"hello world");
+        let range = fs.read_range(path, 0, 5).unwrap();
+        assert_eq!(range, b"hello");
+        assert!(fs.read_range(path, 100, 5).is_err());
+        fs.create_dir_all("test_dir").unwrap();
+        let dir_content = fs.read_dir("test_dir").unwrap();
+        assert_eq!(dir_content.len(), 0);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir("test_dir");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_std_executor_and_queue() {
+        let exec = StdExecutor;
+        let q = alloc::sync::Arc::new(crate::queue::BoundedQueue::new(16));
+        let mq = StdMessageQueue { rx: q.clone() };
+        let ms = StdMessageSender { tx: q };
+        
+        let cmd = crate::commands::PartitionCommand::Shutdown;
+        ms.send(cmd).unwrap();
+        let recv_cmd = mq.recv().unwrap();
+        match recv_cmd {
+            crate::commands::PartitionCommand::Shutdown => {}
+            _ => panic!("Expected Shutdown"),
+        }
+        
+        exec.spawn_task(alloc::boxed::Box::new(|| {
+            let _ = 1 + 1;
+        }));
+    }
+
+    #[test]
+    fn test_backoff() {
+        let mut backoff = Backoff::default();
+        assert!(!backoff.is_completed());
+        for _ in 0..101 {
+            backoff.snooze();
+        }
+        assert!(backoff.is_completed());
     }
 }

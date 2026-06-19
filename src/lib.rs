@@ -48,6 +48,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod platform;
+pub mod sync;
 pub mod qsbr;
 mod storage;
 pub mod unsafe_core;
@@ -57,12 +58,43 @@ pub mod commands;
 mod partition;
 mod query;
 mod dispatcher;
-mod ops;
 mod bloom;
 pub mod wal;
-
 #[cfg(not(feature = "dualcache-ff"))]
-mod dualcache_stub;
+mod dualcache_stub {
+    #[derive(Clone, Debug)]
+    pub struct DualCacheFF<K, V> {
+        _marker: core::marker::PhantomData<(K, V)>,
+    }
+
+    unsafe impl<K, V> Send for DualCacheFF<K, V> {}
+    unsafe impl<K, V> Sync for DualCacheFF<K, V> {}
+
+    #[derive(Clone, Debug)]
+    pub struct Config;
+
+    impl Config {
+        pub fn with_memory_budget(_budget: usize, _percent: usize) -> Self {
+            Self
+        }
+    }
+
+    impl<K, V> DualCacheFF<K, V> {
+        pub fn new(_config: Config) -> Self {
+            Self {
+                _marker: core::marker::PhantomData,
+            }
+        }
+
+        pub fn insert(&self, _key: K, _value: V) {}
+        pub fn remove(&self, _key: &K) -> Option<V> {
+            None
+        }
+        pub fn get(&self, _key: &K) -> Option<&V> {
+            None
+        }
+    }
+}
 
 // Re-export public types for API compatibility
 pub use column::{Columns, ColumnArray};
@@ -74,12 +106,18 @@ pub use dispatcher::{CdDBDispatcher, PartitionRoute};
 pub use dispatcher::UserWriter;
 pub use qsbr::{QsbrManager, WorkerState};
 pub use storage::{Storage, EntityData};
-pub use ops::{ITOpsRecord, LogLevel, ITOpsIngest};
+pub use commands::{ITOpsRecord, LogLevel, ITOpsIngest};
 pub use wal::{WalProvider, StdWal, NoopWal, WalMode};
 pub use platform::FileSystem;
 
 #[cfg(feature = "dualcache-ff")]
+#[cfg(feature = "std")]
 pub use dualcache_ff::{DualCacheFF, Config};
+
+#[cfg(feature = "dualcache-ff")]
+#[cfg(not(feature = "std"))]
+pub use dualcache_ff::{StaticDualCache as DualCacheFF, Config};
+
 #[cfg(not(feature = "dualcache-ff"))]
 pub use dualcache_stub::{DualCacheFF, Config};
 

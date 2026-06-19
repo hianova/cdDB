@@ -1,20 +1,19 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::{String, ToString};
+use alloc::string::String;
+#[cfg(feature = "std")]
+use alloc::string::ToString;
 use crate::commands::WriteCommand;
 use crate::platform::FileSystem;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Default)]
 pub enum WalMode {
+    #[default]
     Sync,
     Async100ms,
 }
 
-impl Default for WalMode {
-    fn default() -> Self {
-        WalMode::Sync
-    }
-}
 
 pub trait WalProvider: Send + Sync {
     fn append(&self, cmd: &WriteCommand) -> Result<(), String>;
@@ -36,7 +35,7 @@ pub struct StdWal {
     pub fs: Arc<dyn FileSystem>,
     pub mode: WalMode,
     #[cfg(feature = "std")]
-    pub writer: Arc<crate::platform::Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    pub writer: Arc<crate::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     #[cfg(feature = "std")]
     pub async_buffer: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
     #[cfg(feature = "std")]
@@ -51,12 +50,12 @@ impl StdWal {
             let file_opt = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .write(true)
+                
                 .open(&path)
                 .ok()
                 .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
             
-            let writer = Arc::new(crate::platform::Mutex::new(file_opt));
+            let writer = Arc::new(crate::sync::Mutex::new(file_opt));
             let async_buffer = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::with_capacity(10000)));
             let condvar = Arc::new(std::sync::Condvar::new());
 
@@ -210,5 +209,52 @@ impl WalProvider for StdWal {
             }
         }
         self.fs.read(&self.path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::StdFileSystem;
+
+    #[test]
+    fn test_noop_wal() {
+        let wal = NoopWal;
+        let cmd = WriteCommand::Delete { entity_id: 1 };
+        assert!(wal.append(&cmd).is_ok());
+        assert!(wal.append_batch(&[&cmd]).is_ok());
+        assert!(wal.checkpoint().is_ok());
+        assert_eq!(wal.read_all().unwrap(), Vec::<u8>::new());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_std_wal_sync() {
+        let fs = Arc::new(StdFileSystem);
+        let path = "test_wal_sync.log".to_string();
+        let _ = std::fs::remove_file(&path);
+        let wal = StdWal::new(path.clone(), fs, WalMode::Sync);
+        let cmd = WriteCommand::Delete { entity_id: 2 };
+        wal.append(&cmd).unwrap();
+        wal.checkpoint().unwrap();
+        let data = wal.read_all().unwrap();
+        assert!(!data.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_std_wal_async() {
+        let fs = Arc::new(StdFileSystem);
+        let path = "test_wal_async.log".to_string();
+        let _ = std::fs::remove_file(&path);
+        let wal = StdWal::new(path.clone(), fs, WalMode::Async100ms);
+        let cmd = WriteCommand::Delete { entity_id: 3 };
+        wal.append_batch(&[&cmd, &cmd]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        wal.checkpoint().unwrap();
+        let data = wal.read_all().unwrap();
+        assert!(!data.is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 }

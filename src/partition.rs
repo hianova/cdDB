@@ -3,11 +3,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::vec;
 use alloc::string::{String, ToString};
-use crate::platform::atomic::AtomicPtr;
+use crate::sync::atomic::AtomicPtr;
 use crate::platform::FileSystem;
 
-#[cfg(not(feature = "std"))]
-use crate::platform::Mutex;
 
 use crate::DualCacheFF;
 use crate::bloom::SimpleBloom;

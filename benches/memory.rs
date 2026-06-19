@@ -7,8 +7,8 @@ fn memory_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("Memory Ops");
 
     group.bench_function("ColumnArray String Allocation (1000 items)", |b| {
-        let worker = Arc::new(WorkerState::new());
-        let mut qsbr = cdDB::qsbr::QsbrManager::new(Arc::new(cdDB::platform::atomic::AtomicPtr::new(std::ptr::null_mut())));
+        let _worker = Arc::new(WorkerState::new());
+        let mut qsbr = cdDB::qsbr::QsbrManager::new(Arc::new(cdDB::sync::atomic::AtomicPtr::new(std::ptr::null_mut())));
         b.iter(|| {
             let col = ColumnArray::<String, 1024>::new();
             let mut next = cdDB::unsafe_core::load_clone(&col.data);

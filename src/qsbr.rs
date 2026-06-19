@@ -1,4 +1,4 @@
-use crate::platform::atomic::{AtomicUsize, AtomicPtr, Ordering};
+use crate::sync::atomic::{AtomicUsize, AtomicPtr, Ordering};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::unsafe_core::GarbageEntry;
@@ -14,6 +14,12 @@ pub static GLOBAL_EPOCH: core::sync::atomic::AtomicUsize = core::sync::atomic::A
 /// RCU 的執行緒本地狀態
 pub struct WorkerState {
     pub local_epoch: AtomicUsize,
+}
+
+impl Default for WorkerState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WorkerState {
@@ -70,7 +76,7 @@ impl QsbrManager {
         let mut min_epoch = current_global;
 
         let mut curr_ptr = self.workers.load(Ordering::Acquire);
-        while let Some(node) = crate::unsafe_core::load_node(curr_ptr) {
+        while let Some(node) = unsafe { crate::unsafe_core::load_node(curr_ptr) } {
             let epoch = node.worker.local_epoch.load(Ordering::Acquire);
             if epoch != 0 && epoch < min_epoch {
                 min_epoch = epoch;

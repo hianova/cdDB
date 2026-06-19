@@ -1,5 +1,4 @@
 /target
 TODO.md
-dhat-heap.json
-scratch.rs
 *.rlib
+.DS_Store

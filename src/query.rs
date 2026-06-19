@@ -76,11 +76,11 @@ impl<T: Clone> Bump<T> {
         Self { chunks: core::cell::RefCell::new(Vec::new()) }
     }
     
-    pub fn alloc(&self, data: Vec<T>) -> &mut [T] {
+    pub fn alloc(&self, data: Vec<T>) -> &[T] {
         let mut chunks = self.chunks.borrow_mut();
         chunks.push(data);
-        let last = chunks.last_mut().unwrap();
-        unsafe { core::slice::from_raw_parts_mut(last.as_mut_ptr(), last.len()) }
+        let last = chunks.last().unwrap();
+        unsafe { core::slice::from_raw_parts(last.as_ptr(), last.len()) }
     }
 }
 
@@ -181,9 +181,9 @@ impl<'a, const N: usize> QuerySession<'a, N> {
                     attr,
                     len,
                 } => {
-                    if let Some(ptr) = self.get_pointer(*entity_id) {
-                        if let Some(&start_idx) = ptr.attribute_indices.get(*attr) {
-                            if let Some(col) = self.route.get_column_int(attr, &self.worker) {
+                    if let Some(ptr) = self.get_pointer(*entity_id)
+                        && let Some(&start_idx) = ptr.attribute_indices.get(*attr)
+                            && let Some(col) = self.route.get_column_int(attr, self.worker) {
                                 let range_vals = col.with_data_pinned(|data| {
                                     data.iter()
                                         .skip(start_idx)
@@ -196,25 +196,23 @@ impl<'a, const N: usize> QuerySession<'a, N> {
                                 cb(QueryResult::IntRange(slice));
                                 continue;
                             }
-                        }
-                    }
                     cb(QueryResult::None);
                 }
                 QueryNode::Scan { attr } => {
-                    if let Some(col) = self.route.get_column_int(attr, &self.worker) {
+                    if let Some(col) = self.route.get_column_int(attr, self.worker) {
                         let vals = col.with_data_pinned(|data| {
                             data.iter().flatten().cloned().collect::<Vec<u32>>()
                         });
                         let slice = self.int_arena.alloc(vals);
                         cb(QueryResult::IntList(slice));
-                    } else if let Some(col) = self.route.get_column_str(attr, &self.worker) {
+                    } else if let Some(col) = self.route.get_column_str(attr, self.worker) {
                         let vals = col.with_data_pinned(|data| {
                             let data_ref = unsafe { core::mem::transmute::<&_, &'a crate::column::ColumnData<String>>(data) };
                             data_ref.iter().flatten().map(|s| s.as_str()).collect::<Vec<&'a str>>()
                         });
                         let slice = self.str_arena.alloc(vals);
                         cb(QueryResult::StrList(slice));
-                    } else if let Some(col) = self.route.get_column_blob(attr, &self.worker) {
+                    } else if let Some(col) = self.route.get_column_blob(attr, self.worker) {
                         let vals = col.with_data_pinned(|data| {
                             let data_ref = unsafe { core::mem::transmute::<&_, &'a crate::column::ColumnData<Vec<u8>>>(data) };
                             data_ref.iter().flatten().map(|s| s.as_slice()).collect::<Vec<&'a [u8]>>()
@@ -226,9 +224,9 @@ impl<'a, const N: usize> QuerySession<'a, N> {
                     }
                 }
                 QueryNode::Aggregate { attr, op } => {
-                    if let Some(col) = self.route.get_column_int(attr, &self.worker) {
+                    if let Some(col) = self.route.get_column_int(attr, self.worker) {
                         let res = col.with_data_pinned(|data| {
-                            let it = data.iter().flatten().map(|&v| v);
+                            let it = data.iter().flatten().copied();
                             match op {
                                 AggregateOp::Sum => QueryResult::IntSum(it.map(|v| v as u64).sum()),
                                 AggregateOp::Count => QueryResult::Count(it.count()),
@@ -296,38 +294,35 @@ impl<'a, const N: usize> QuerySession<'a, N> {
     }
 
     pub fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
-        if let Some(ptr) = self.get_pointer(entity_id) {
-            if let Some(&idx) = ptr.attribute_indices.get(attr) {
+        if let Some(ptr) = self.get_pointer(entity_id)
+            && let Some(&idx) = ptr.attribute_indices.get(attr) {
                 return self
                     .route
-                    .get_column_str(attr, &self.worker)
+                    .get_column_str(attr, self.worker)
                     .and_then(|col| col.get_element_pinned(idx));
             }
-        }
         None
     }
 
     pub fn get_int(&self, entity_id: usize, attr: &str) -> Option<u32> {
-        if let Some(ptr) = self.get_pointer(entity_id) {
-            if let Some(&idx) = ptr.attribute_indices.get(attr) {
+        if let Some(ptr) = self.get_pointer(entity_id)
+            && let Some(&idx) = ptr.attribute_indices.get(attr) {
                 return self
                     .route
-                    .get_column_int(attr, &self.worker)
+                    .get_column_int(attr, self.worker)
                     .and_then(|col| col.get_element_pinned(idx));
             }
-        }
         None
     }
 
     pub fn get_blob(&self, entity_id: usize, attr: &str) -> Option<Vec<u8>> {
-        if let Some(ptr) = self.get_pointer(entity_id) {
-            if let Some(&idx) = ptr.attribute_indices.get(attr) {
+        if let Some(ptr) = self.get_pointer(entity_id)
+            && let Some(&idx) = ptr.attribute_indices.get(attr) {
                 return self
                     .route
-                    .get_column_blob(attr, &self.worker)
+                    .get_column_blob(attr, self.worker)
                     .and_then(|col| col.get_element_pinned(idx));
             }
-        }
         None
     }
 
@@ -336,14 +331,13 @@ impl<'a, const N: usize> QuerySession<'a, N> {
     where
         F: FnOnce(&str) -> R,
     {
-        if let Some(ptr) = self.get_pointer(entity_id) {
-            if let Some(&idx) = ptr.attribute_indices.get(attr) {
+        if let Some(ptr) = self.get_pointer(entity_id)
+            && let Some(&idx) = ptr.attribute_indices.get(attr) {
                 return self
                     .route
-                    .get_column_str(attr, &self.worker)
+                    .get_column_str(attr, self.worker)
                     .and_then(|col| col.with_element_pinned(idx, |s| f(s)));
             }
-        }
         None
     }
 
@@ -352,14 +346,13 @@ impl<'a, const N: usize> QuerySession<'a, N> {
     where
         F: FnOnce(&[u8]) -> R,
     {
-        if let Some(ptr) = self.get_pointer(entity_id) {
-            if let Some(&idx) = ptr.attribute_indices.get(attr) {
+        if let Some(ptr) = self.get_pointer(entity_id)
+            && let Some(&idx) = ptr.attribute_indices.get(attr) {
                 return self
                     .route
-                    .get_column_blob(attr, &self.worker)
+                    .get_column_blob(attr, self.worker)
                     .and_then(|col| col.with_element_pinned(idx, |b| f(b)));
             }
-        }
         None
     }
 
@@ -370,11 +363,11 @@ impl<'a, const N: usize> QuerySession<'a, N> {
             let epoch_idx = ptr.attribute_indices.get("epoch")?;
             let type_idx = ptr.attribute_indices.get("type")?;
             
-            let payload = self.route.get_column_blob("payload", &self.worker)?
+            let payload = self.route.get_column_blob("payload", self.worker)?
                 .get_element_pinned(*payload_idx)?;
-            let epoch = self.route.get_column_int("epoch", &self.worker)?
+            let epoch = self.route.get_column_int("epoch", self.worker)?
                 .get_element_pinned(*epoch_idx)?;
-            let record_type = self.route.get_column_int("type", &self.worker)?
+            let record_type = self.route.get_column_int("type", self.worker)?
                 .get_element_pinned(*type_idx)?;
                 
             return Some((payload, epoch, record_type));
@@ -431,7 +424,7 @@ mod tests {
 
     #[test]
     fn test_unsafe_transmute_lifetime() {
-        use crate::platform::atomic::AtomicPtr;
+        use crate::sync::atomic::AtomicPtr;
         let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers);
         let col = Arc::new(ColumnArray::<alloc::string::String, 1024>::new());
@@ -452,5 +445,31 @@ mod tests {
         assert_eq!(vals.len(), 2);
         assert_eq!(vals[0], "hello");
         assert_eq!(vals[1], "world");
+    }
+
+    #[test]
+    fn test_bump_allocator() {
+        let bump = Bump::new();
+        let s = bump.alloc(vec![1, 2, 3]);
+        assert_eq!(s.len(), 3);
+        assert_eq!(s[0], 1);
+    }
+
+    #[test]
+    fn test_query_node_debug() {
+        let node = QueryNode::Get { entity_id: 1, attr: "a" };
+        let s = alloc::format!("{:?}", node);
+        assert!(s.contains("Get"));
+        let node2 = QueryNode::Scan { attr: "b" };
+        assert!(alloc::format!("{:?}", node2).contains("Scan"));
+    }
+
+    #[test]
+    fn test_query_result_debug() {
+        let res = QueryResult::IntSum(100);
+        let s = alloc::format!("{:?}", res);
+        assert!(s.contains("IntSum(100)"));
+        let op = AggregateOp::Sum;
+        assert!(alloc::format!("{:?}", op).contains("Sum"));
     }
 }

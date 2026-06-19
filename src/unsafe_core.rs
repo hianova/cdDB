@@ -1,4 +1,4 @@
-use crate::platform::atomic::{AtomicPtr, Ordering};
+use crate::sync::atomic::{AtomicPtr, Ordering};
 use alloc::boxed::Box;
 
 /// Safely load a reference from an AtomicPtr.
@@ -61,7 +61,9 @@ impl Drop for GarbageEntry {
 }
 
 /// Safely dereference a pointer to a node, returning None if null.
-pub fn load_node<'a, T>(ptr: *mut T) -> Option<&'a T> {
+/// # Safety
+/// The caller must ensure that `ptr` is either null or points to a valid `T` that is safe to dereference.
+pub unsafe fn load_node<'a, T>(ptr: *mut T) -> Option<&'a T> {
     if ptr.is_null() {
         None
     } else {
@@ -70,14 +72,16 @@ pub fn load_node<'a, T>(ptr: *mut T) -> Option<&'a T> {
 }
 
 /// Safely store a pointer into an AtomicPtr field of a node.
-pub fn link_node<T, P>(
+/// # Safety
+/// The caller must ensure that `node` is either null or points to a valid `T`.
+pub unsafe fn link_node<T, P>(
     node: *mut T,
-    get_atomic_field: impl FnOnce(&T) -> &crate::platform::atomic::AtomicPtr<P>,
+    get_atomic_field: impl FnOnce(&T) -> &crate::sync::atomic::AtomicPtr<P>,
     next_ptr: *mut P,
 ) {
     if !node.is_null() {
         let atomic = unsafe { get_atomic_field(&*node) };
-        atomic.store(next_ptr, crate::platform::atomic::Ordering::Relaxed);
+        atomic.store(next_ptr, crate::sync::atomic::Ordering::Relaxed);
     }
 }
 

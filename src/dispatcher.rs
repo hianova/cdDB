@@ -4,12 +4,10 @@ use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
 use crate::query::{Query, QueryNode, QueryResult};
-use crate::platform::atomic::AtomicPtr;
+use crate::sync::atomic::AtomicPtr;
 
 #[cfg(feature = "std")]
 use crate::queue::BoundedQueue;
-#[cfg(not(feature = "std"))]
-use crate::platform::Mutex;
 
 use crate::bloom::SimpleBloom;
 use crate::{DualCacheFF, Config};
@@ -48,7 +46,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         Self {
             route_table: AHashMap::default(),
             base_path,
-            workers: Arc::new(crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut())),
+            workers: Arc::new(crate::sync::atomic::AtomicPtr::new(core::ptr::null_mut())),
             fs,
             executor,
             global_cache: Arc::new(DualCacheFF::new(Config::with_memory_budget(100, 60))),
@@ -178,7 +176,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<N>::new()));
         let columns = Arc::new(new_atomic_ptr(Columns::<N>::new()));
-        let workers = Arc::new(crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut()));
+        let workers = Arc::new(crate::sync::atomic::AtomicPtr::new(core::ptr::null_mut()));
         
         (storage_path, shared_pointers, bloom, columns, workers)
     }
@@ -257,15 +255,15 @@ impl<const N: usize> CdDBDispatcher<N> {
         R: Send + 'static,
     {
         if let Some(route) = self.route_table.get(&partition).cloned() {
-            let res = tokio::task::spawn_blocking(move || {
+            
+            tokio::task::spawn_blocking(move || {
                 let q = Query::new(&route);
                 let mut last_res = None;
                 q.execute_with_cb(&nodes, |res| {
                     last_res = Some(cb(res));
                 });
                 last_res
-            }).await.unwrap();
-            res
+            }).await.unwrap()
         } else {
             None
         }
@@ -342,16 +340,16 @@ impl<const N: usize> PartitionRoute<N> {
         let worker = Arc::new(WorkerState::new());
         let new_node = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(crate::qsbr::WorkerNode {
             worker: Arc::clone(&worker),
-            next: crate::platform::atomic::AtomicPtr::new(core::ptr::null_mut()),
+            next: crate::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
         }));
         loop {
-            let head = self.workers.load(crate::platform::atomic::Ordering::Acquire);
-            crate::unsafe_core::link_node(new_node, |n| &n.next, head);
+            let head = self.workers.load(crate::sync::atomic::Ordering::Acquire);
+            unsafe { crate::unsafe_core::link_node(new_node, |n| &n.next, head); }
             if self.workers.compare_exchange(
                 head,
                 new_node,
-                crate::platform::atomic::Ordering::Release,
-                crate::platform::atomic::Ordering::Relaxed,
+                crate::sync::atomic::Ordering::Release,
+                crate::sync::atomic::Ordering::Relaxed,
             ).is_ok() {
                 break;
             }

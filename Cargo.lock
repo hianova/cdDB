@@ -285,9 +285,9 @@ dependencies = [
 
 [[package]]
 name = "dualcache-ff"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc03add4b1537ef830e496fe135a7524c5d0883a52f63cefc59076bed8b9c8ad"
+checksum = "fdabb4de3f7733d05292a324481e2773f601f139b1837991d870c1ed4b26a08c"
 dependencies = [
  "ahash",
  "loom",

@@ -1,6 +1,7 @@
 use crate::AHashMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::format;
 use crate::partition::MultiVectorPointer;
 
 /// cdDB 支援的資料類型
@@ -34,6 +35,10 @@ impl<V> Attributes<V> {
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     pub fn encode_to(&self, buf: &mut Vec<u8>, val_encoder: fn(&V, &mut Vec<u8>)) {
@@ -142,7 +147,7 @@ impl WriteCommand {
                     b.extend_from_slice(v.as_bytes());
                 });
                 attributes_int.encode_to(&mut buf, |v: &u32, b: &mut Vec<u8>| {
-                    b.extend_from_slice(&(*v as u32).to_le_bytes());
+                    b.extend_from_slice(&(*v).to_le_bytes());
                 });
                 attributes_blob.encode_to(&mut buf, |v: &Vec<u8>, b: &mut Vec<u8>| {
                     b.extend_from_slice(&(v.len() as u32).to_le_bytes());
@@ -159,7 +164,7 @@ impl WriteCommand {
                         b.extend_from_slice(v.as_bytes());
                     });
                     attrs_int.encode_to(&mut buf, |v: &u32, b: &mut Vec<u8>| {
-                        b.extend_from_slice(&(*v as u32).to_le_bytes());
+                        b.extend_from_slice(&(*v).to_le_bytes());
                     });
                     attrs_blob.encode_to(&mut buf, |v: &Vec<u8>, b: &mut Vec<u8>| {
                         b.extend_from_slice(&(v.len() as u32).to_le_bytes());
@@ -301,9 +306,70 @@ impl core::fmt::Debug for PartitionCommand {
     }
 }
 
+/// IT Operations Log Levels
+#[derive(Debug, Clone)]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+    Fatal,
+    Debug,
+}
+
+/// A structured record for IT Operations (Monitoring, Logging, etc.)
+#[derive(Debug, Clone)]
+pub struct ITOpsRecord {
+    pub timestamp: u64,
+    pub service: String,
+    pub node: String,
+    pub level: LogLevel,
+    pub message: String,
+    pub cpu_usage: f32, // 0.0 - 1.0
+    pub mem_usage: f32, // 0.0 - 1.0
+    pub response_time_ms: u32,
+}
+
+impl ITOpsRecord {
+    /// Converts the structured record into cdDB compatible attributes.
+    /// Usage percentages are scaled by 1000 for precision in u32.
+    pub fn to_cd_db_params(&self) -> (Attributes<String>, Attributes<u32>) {
+        let mut attrs = AHashMap::default();
+        attrs.insert("service".to_string(), self.service.clone());
+        attrs.insert("node".to_string(), self.node.clone());
+        attrs.insert("level".to_string(), format!("{:?}", self.level));
+        attrs.insert("message".to_string(), self.message.clone());
+
+        let mut attrs_int = AHashMap::default();
+        attrs_int.insert("timestamp".to_string(), (self.timestamp % (u32::MAX as u64)) as u32);
+        attrs_int.insert("cpu_milli".to_string(), (self.cpu_usage * 1000.0) as u32);
+        attrs_int.insert("mem_milli".to_string(), (self.mem_usage * 1000.0) as u32);
+        attrs_int.insert("response_time".to_string(), self.response_time_ms);
+
+        (attrs.into(), attrs_int.into())
+    }
+}
+
+/// Extension trait for easier ITOps data ingestion
+pub trait ITOpsIngest {
+    fn insert_ops_record(&self, entity_id: usize, record: ITOpsRecord) -> crate::commands::WriteCommand;
+}
+
+impl ITOpsIngest for ITOpsRecord {
+    fn insert_ops_record(&self, entity_id: usize, record: ITOpsRecord) -> crate::commands::WriteCommand {
+        let (attributes, attributes_int) = record.to_cd_db_params();
+        crate::commands::WriteCommand::Insert {
+            entity_id,
+            attributes,
+            attributes_int,
+            attributes_blob: crate::commands::Attributes::<Vec<u8>>::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn test_write_command_encode_decode() {
@@ -325,6 +391,91 @@ mod tests {
             assert_eq!(attributes_int.get("val"), Some(&42));
         } else {
             panic!("Decode failed");
+        }
+    }
+
+    #[test]
+    fn test_attributes() {
+        let mut attrs = Attributes::new();
+        attrs.insert("key".to_string(), "val".to_string());
+        assert!(!attrs.is_empty());
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs.get("key"), Some(&"val".to_string()));
+        let mut buf = Vec::new();
+        attrs.encode_to(&mut buf, |v, b| {
+            b.extend_from_slice(&(v.len() as u32).to_le_bytes());
+            b.extend_from_slice(v.as_bytes());
+        });
+        let mut pos = 0;
+        let dec = Attributes::<String>::decode_from(&buf, &mut pos, |b, p| {
+            let len = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap()) as usize;
+            *p += 4;
+            let s = core::str::from_utf8(b.get(*p..*p + len).unwrap()).unwrap().to_string();
+            *p += len;
+            s
+        }).unwrap();
+        assert_eq!(dec.get("key"), Some(&"val".to_string()));
+    }
+
+    #[test]
+    fn test_it_ops() {
+        let record = ITOpsRecord {
+            timestamp: 1000,
+            service: "web".to_string(),
+            node: "n1".to_string(),
+            level: LogLevel::Info,
+            message: "ok".to_string(),
+            cpu_usage: 0.5,
+            mem_usage: 0.6,
+            response_time_ms: 200,
+        };
+        let cmd = record.insert_ops_record(10, record.clone());
+        if let WriteCommand::Insert { entity_id, attributes, attributes_int, .. } = cmd {
+            assert_eq!(entity_id, 10);
+            assert_eq!(attributes.get("service").unwrap(), "web");
+            assert_eq!(attributes_int.get("cpu_milli").unwrap(), &500);
+        } else {
+            panic!("Wrong command type");
+        }
+    }
+
+    #[test]
+    fn test_partition_command_debug() {
+        let cmd = PartitionCommand::Shutdown;
+        let s = format!("{:?}", cmd);
+        assert_eq!(s, "Shutdown");
+    }
+
+    #[test]
+    fn test_batch_and_fast_insert() {
+        let fast = WriteCommand::InsertFast {
+            entity_id: 1,
+            epoch: 2,
+            record_type: 3,
+            payload: alloc::sync::Arc::new(vec![1, 2, 3]),
+        };
+        let enc_fast = fast.encode();
+        let dec_fast = WriteCommand::decode(&enc_fast).unwrap();
+        if let WriteCommand::InsertFast { entity_id, epoch, .. } = dec_fast {
+            assert_eq!(entity_id, 1);
+            assert_eq!(epoch, 2);
+        } else {
+            panic!("Failed fast insert");
+        }
+
+        let batch = WriteCommand::BatchInsert(vec![(
+            5,
+            Attributes::new(),
+            Attributes::new(),
+            Attributes::new(),
+        )]);
+        let enc_batch = batch.encode();
+        let dec_batch = WriteCommand::decode(&enc_batch).unwrap();
+        if let WriteCommand::BatchInsert(items) = dec_batch {
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].0, 5);
+        } else {
+            panic!("Failed batch insert");
         }
     }
 }

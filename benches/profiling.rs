@@ -26,6 +26,6 @@ fn main() {
         let q = CdDbQuery {
             nodes: vec![QueryNode::Get { entity_id: 5000, attr: "name" }]
         };
-        let _ = query.execute_with_cb(&q.nodes, |_res| {});
+        query.execute_with_cb(&q.nodes, |_res| {});
     }
 }

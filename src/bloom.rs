@@ -1,7 +1,7 @@
 use core::hash::Hash;
 use ahash::RandomState;
 
-use crate::platform::atomic::{AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicUsize, Ordering};
 
 
 

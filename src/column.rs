@@ -2,7 +2,7 @@ use crate::AHashMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::string::String;
-use crate::platform::atomic::{AtomicBool, AtomicPtr, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use crate::unsafe_core::{load_clone, load_ref, new_atomic_ptr};
 use crate::qsbr::WorkerState;
 
@@ -11,6 +11,12 @@ pub struct Columns<const N: usize> {
     pub str_cols: AHashMap<String, Arc<ColumnArray<String, N>>>,
     pub int_cols: AHashMap<String, Arc<ColumnArray<u32, N>>>,
     pub blob_cols: AHashMap<String, Arc<ColumnArray<Vec<u8>, N>>>,
+}
+
+impl<const N: usize> Default for Columns<N> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<const N: usize> Columns<N> {
@@ -27,6 +33,12 @@ impl<const N: usize> Columns<N> {
 pub struct ColumnData<T> {
     pub data: Vec<T>,
     pub valid: Vec<u64>,
+}
+
+impl<T: Default + Clone> Default for ColumnData<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T: Default + Clone> ColumnData<T> {
@@ -72,6 +84,10 @@ impl<T: Default + Clone> ColumnData<T> {
 
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+    
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
     }
 
     pub fn push(&mut self, val: T) {
@@ -233,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_column_array_insertion() {
-        use crate::platform::atomic::AtomicPtr;
+        use crate::sync::atomic::AtomicPtr;
         use alloc::sync::Arc;
         let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers);

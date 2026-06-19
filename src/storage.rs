@@ -22,7 +22,7 @@ impl EntityData {
             b.extend_from_slice(v.as_bytes());
         });
         self.attributes_int.encode_to(&mut buf, |v: &u32, b: &mut Vec<u8>| {
-            b.extend_from_slice(&(*v as u32).to_le_bytes());
+            b.extend_from_slice(&(*v).to_le_bytes());
         });
         self.attributes_blob.encode_to(&mut buf, |v: &Vec<u8>, b: &mut Vec<u8>| {
             b.extend_from_slice(&(v.len() as u32).to_le_bytes());
@@ -66,12 +66,12 @@ impl EntityData {
 pub struct Storage {
     pub base_path: String,
     pub fs: Arc<dyn FileSystem>,
-    pub disk_index: crate::platform::Mutex<AHashMap<usize, (u64, u32)>>,
-    pub current_offset: crate::platform::Mutex<u64>,
+    pub disk_index: crate::sync::Mutex<AHashMap<usize, (u64, u32)>>,
+    pub current_offset: crate::sync::Mutex<u64>,
     #[cfg(feature = "std")]
-    pub writer: crate::platform::Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+    pub writer: crate::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>>,
     #[cfg(feature = "std")]
-    pub mmap: crate::platform::Mutex<Option<alloc::sync::Arc<memmap2::Mmap>>>,
+    pub mmap: crate::sync::Mutex<Option<alloc::sync::Arc<memmap2::Mmap>>>,
 }
 
 impl Storage {
@@ -84,22 +84,22 @@ impl Storage {
             let file_opt = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .write(true)
+                
                 .open(&path)
                 .ok()
                 .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
-            crate::platform::Mutex::new(file_opt)
+            crate::sync::Mutex::new(file_opt)
         };
 
         let storage = Self {
             base_path,
             fs,
-            disk_index: crate::platform::Mutex::new(AHashMap::default()),
-            current_offset: crate::platform::Mutex::new(0),
+            disk_index: crate::sync::Mutex::new(AHashMap::default()),
+            current_offset: crate::sync::Mutex::new(0),
             #[cfg(feature = "std")]
             writer,
             #[cfg(feature = "std")]
-            mmap: crate::platform::Mutex::new(None),
+            mmap: crate::sync::Mutex::new(None),
         };
         storage.rebuild_disk_index();
         storage
@@ -199,7 +199,7 @@ impl Storage {
             self.fs.append(&path, &record)?;
             *off_lock = offset + record.len() as u64;
             index.insert(data.entity_id, (offset, bytes.len() as u32));
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(feature = "std"))]
@@ -245,12 +245,11 @@ impl Storage {
             };
             
             let mmap = if remap_needed {
-                if let Ok(mut w) = self.writer.lock() {
-                    if let Some(writer) = w.as_mut() {
+                if let Ok(mut w) = self.writer.lock()
+                    && let Some(writer) = w.as_mut() {
                         use std::io::Write;
                         let _ = writer.flush();
                     }
-                }
                 let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
                 let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| e.to_string())?;
                 let arc_mmap = alloc::sync::Arc::new(mmap);
@@ -370,7 +369,7 @@ impl Storage {
             *writer_lock = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .write(true)
+                
                 .open(&path)
                 .ok()
                 .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
@@ -382,5 +381,56 @@ impl Storage {
             *mmap_lock = None;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_entity_data_encode_decode() {
+        let mut attrs = crate::Attributes::new();
+        attrs.insert("name".to_string(), "foo".to_string());
+        
+        let data = EntityData {
+            entity_id: 42,
+            attributes: attrs,
+            attributes_int: crate::Attributes::new(),
+            attributes_blob: crate::Attributes::new(),
+        };
+        
+        let buf = data.encode();
+        let dec = EntityData::decode(&buf).unwrap();
+        assert_eq!(dec.entity_id, 42);
+        assert_eq!(dec.attributes.get("name").unwrap(), "foo");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_storage_read_write() {
+        let fs = Arc::new(crate::platform::StdFileSystem);
+        let path = "test_storage_dir";
+        let _ = std::fs::remove_dir_all(path);
+        let storage = Storage::new(path.to_string(), fs);
+        let data = EntityData {
+            entity_id: 10,
+            attributes: crate::Attributes::new(),
+            attributes_int: crate::Attributes::new(),
+            attributes_blob: crate::Attributes::new(),
+        };
+        storage.write_entity(&data).unwrap();
+        let read_data = storage.read_entity(10).unwrap();
+        assert_eq!(read_data.entity_id, 10);
+        
+        let block = storage.read_block(10, 5);
+        assert!(!block.is_empty());
+        assert_eq!(block[0].entity_id, 10);
+        
+        storage.compact().unwrap();
+        let read_data2 = storage.read_entity(10).unwrap();
+        assert_eq!(read_data2.entity_id, 10);
+        
+        let _ = std::fs::remove_dir_all(path);
     }
 }
