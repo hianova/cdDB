@@ -1,3 +1,51 @@
+# cdDB Performance Report (v0.5.0)
+
+## Criterion Benchmark Output (v0.5.0)
+```text
+Benchmarking Read Throughput/Single Thread Get Int
+                        time:   [91.395 ns 91.995 ns 92.635 ns]
+                        thrpt:  [10.795 Melem/s 10.870 Melem/s 10.942 Melem/s]
+
+Benchmarking Read Throughput/Multi-Thread (4 Readers) Stress
+                        time:   [182.69 ns 183.56 ns 184.47 ns]
+                        thrpt:  [21.684 Melem/s 21.791 Melem/s 21.896 Melem/s]
+
+Benchmarking Read Throughput/Multi-Thread (4 Readers) Columnar Read
+                        time:   [2.5055 ns 2.6021 ns 2.7087 ns]
+                        thrpt:  [1.4767 Gelem/s 1.5372 Gelem/s 1.5965 Gelem/s]
+
+Benchmarking Write Throughput/Batch Insert (1000 items)
+                        time:   [926.81 µs 955.22 µs 988.63 µs]
+                        thrpt:  [1.0115 Melem/s 1.0469 Melem/s 1.0790 Melem/s]
+
+Benchmarking Access Latency/Hot Path Get Int (Wait-Free RCU)
+                        time:   [35.281 ns 35.466 ns 35.763 ns]
+
+Benchmarking Access Latency/Bloom Filter Miss
+                        time:   [9.4766 ns 9.5311 ns 9.6091 ns]
+
+Benchmarking Memory Ops/ColumnArray String Allocation (1000 items)
+                        time:   [36.349 µs 37.362 µs 38.561 µs]
+```
+
+## DHAT Heap Profiling (v0.5.0)
+
+Memory allocation behaviors in the wait-free engine were profiled using DHAT.
+- **Total Allocated**: 111.9 MB in 319,640 blocks (a 41% reduction in total bytes and 44% reduction in allocations compared to v0.3.1)
+- **At t-gmax (Peak Memory)**: 93.9 MB in 212,389 blocks (a 43% reduction in peak memory compared to v0.3.1)
+- **At t-end (Live Memory)**: 87.4 MB in 109,741 blocks (a 47% reduction in live memory compared to v0.3.1)
+
+### Analysis
+The massive reduction in allocations and peak/live memory size is the direct result of codebase consolidation and optimized internal structures (including inlining stubs and eliminating micro-file heap allocations).
+
+## Summary of 0.5.0 Architecture Impact
+1. **Codebase Consolidation & Fragmentation Reduction**: Merged `std_impl.rs`, `no_std.rs`, and `loom_impl.rs` into a unified `src/sync/mod.rs` with zero duplicate structs or conditional file clutter. Inlined `dualcache_stub.rs` and `ops.rs` directly into `lib.rs` and `commands.rs`.
+2. **DualCache-FF v0.5.0 & Static Option**: Seamlessly integrated the upgraded `dualcache-ff` v0.5.0. In `#![no_std]` environments, the engine falls back to the zero-idle-thread `StaticDualCache` to avoid OS-level runtime daemon thread dependencies.
+3. **Write Path Performance Boost**: Optimized memory-buffered write structures and reduced fragmentation increased write throughput by ~52% (from 687 Kelem/s in v0.4.0 to 1.05 Melem/s in v0.5.0).
+4. **Test Coverage Resolved**: Added thorough unit tests for `wal.rs`, `platform.rs`, `commands.rs`, `storage.rs`, and `query.rs` raising codebase-wide coverage from 62.37% to 76.31%.
+
+---
+
 # cdDB Performance Report (v0.4.0)
 
 ## Criterion Benchmark Output (v0.4.0)
