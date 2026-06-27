@@ -48,6 +48,16 @@ pub struct ColumnArray<T> {
 }
 ```
 
+#### Columns (Top-Level Container)
+```rust
+pub struct Columns<const N: usize> {
+    pub str_cols: AHashMap<String, Arc<ColumnArray<String, N>>>,
+    pub int_cols: AHashMap<String, Arc<ColumnArray<u32, N>>>,
+    pub blob_cols: AHashMap<String, Arc<ColumnArray<Vec<u8>, N>>>,
+}
+```
+`Columns<const N: usize>` acts as the primary schema-agnostic container, housing typed hash maps that map dynamically registered column names to their underlying wait-free `ColumnArray` chunks.
+
 ---
 
 ## 3. Key Workflows
