@@ -31,7 +31,7 @@ Add `cdDB` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cdDB = "0.4.1"
+cdDB = "1.0.0"
 ```
 
 ### Basic Usage (Synchronous)
@@ -103,7 +103,7 @@ assert!(!db.is_sleeping());
 
 Unlike traditional shutdown/recreation, this logical state does not destroy background daemon threads (such as the `DualCache-FF` daemon or WAL flushers), avoiding high latency overhead when waking up. Instead, threads naturally fall into minimal-execution idle polling (0% CPU).
 
-For advanced embedded features, refer to the [SPEC.md](SPEC.md) document.
+For advanced embedded features, refer to the [SPEC.md](./doc/SPEC.md) document.
 
 ## 📊 Benchmarks & Performance
 
@@ -118,23 +118,7 @@ cargo bench -p cdDB-benches
 cargo test --release -p cdDB-benches --test read_pressure_benchmark -- --nocapture
 ```
 
-### Latest Audit Results (v0.4.0, Apple Silicon, Release Profile)
-
-| Metric | Value |
-|--------|-------|
-| **Single-Thread Read Latency** | ~28.19 ns (hot path, pure wait-free RCU) |
-| **Bloom Filter Miss Latency** | ~6.75 ns (disk I/O avoided, lock-free check) |
-| **Single-Thread Read Throughput** | ~10.19M QPS |
-| **4-Thread Read Throughput (Criterion)** | ~20.19M QPS (Stress) / **~2.02B QPS** (Columnar DOD) |
-| **4-Thread Pressure Throughput (wall-clock)** | **~7.35M QPS** (Get + Link composite ops) |
-| **4-Thread P50 Latency** | **416 ns** |
-| **4-Thread P99 Latency** | **1.54 µs** |
-| **4-Thread Tail Factor (P99/P50)** | **3.71x** (proves wait-free stability) |
-| **Write Throughput** | **~10.19M items/s** (Async100ms Write-Behind WAL) |
-| **Columnar Scan Advantage** | **128x faster** than `Vec<Struct>` (DOD benefit) |
-| **Cold Data Promotion Speedup** | ~330x after promotion to columnar memory cache |
-
-For detailed metrics and historical evolution, see [PERF.md](PERF.md).
+For detailed metrics and historical evolution, see [PERF.md](./doc/PERF.md).
 
 ## 📜 License
 

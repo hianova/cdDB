@@ -22,13 +22,37 @@ unsafe impl<T: Send> Sync for Slot<T> {}
 
 // ── BoundedQueue ──────────────────────────────────────────────────────────
 
-/// MPSC wait-free bounded ring buffer.
+/// MPSC (multi-producer, single-consumer) wait-free bounded ring buffer.
+///
+/// Each partition owns one `BoundedQueue` that acts as its **command channel**:
+/// any number of writer threads may call [`push`](BoundedQueue::push)
+/// concurrently, while exactly one reader thread drains items via
+/// [`pop`](BoundedQueue::pop).
+///
+/// # Capacity constraint
+///
+/// `capacity` must be a **power of two**. This allows the implementation to
+/// replace all modulo operations with a single bitwise AND against `mask`,
+/// keeping the hot path branch-free.
+///
+/// # Wait-freedom
+///
+/// Neither `push` nor `pop` ever spins or blocks. A `push` that cannot claim
+/// a free slot returns `Err(item)` immediately; a `pop` on an empty queue
+/// returns `None` immediately.
 pub struct BoundedQueue<T> {
+    /// Bitmask derived from the capacity (`capacity - 1`).
+    ///
+    /// Because the capacity is always a power of two, `index & mask` is
+    /// equivalent to `index % capacity` but is a single instruction.
     mask: usize,
-    /// Producer cursor — FAA, unbounded (wraps via mask).
+    /// Producer cursor — advanced via fetch-add, unbounded (wraps via `mask`).
     tail: AtomicUsize,
     /// Consumer cursor — single-threaded advance.
     head: AtomicUsize,
+    /// Backing storage: a heap-allocated, fixed-length slice of [`Slot`]s.
+    ///
+    /// The length equals the capacity supplied to [`BoundedQueue::new`].
     buffer: Box<[Slot<T>]>,
 }
 
@@ -36,7 +60,19 @@ unsafe impl<T: Send> Send for BoundedQueue<T> {}
 unsafe impl<T: Send> Sync for BoundedQueue<T> {}
 
 impl<T> BoundedQueue<T> {
-    /// Create a new queue with the given capacity (must be a power of two).
+    /// Creates a new `BoundedQueue` with the given `capacity`.
+    ///
+    /// All slots are initialised in the `EMPTY` state, ready to accept items.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is **not** a power of two (including zero).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let q: BoundedQueue<u32> = BoundedQueue::new(64);
+    /// ```
     pub fn new(capacity: usize) -> Self {
         assert!(
             capacity.is_power_of_two(),
@@ -57,11 +93,21 @@ impl<T> BoundedQueue<T> {
         }
     }
 
-    /// Try to enqueue an item.
+    /// Attempts a wait-free multi-producer enqueue of `item`.
     ///
-    /// Uses FAA to claim a slot index, then CAS EMPTY→WRITING as a physical
-    /// gate. If the slot is occupied (ring buffer lapped or concurrent writer),
-    /// returns `Err(item)` immediately — never blocks.
+    /// Internally this performs a **fetch-add** (FAA) to speculatively claim a
+    /// slot index, then uses a **compare-and-swap** (`EMPTY → WRITING`) as a
+    /// physical gate that confirms the slot is truly available. Writing the
+    /// item and publishing it (`WRITING → READY`) are the final steps.
+    ///
+    /// This method is safe to call from multiple threads simultaneously.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — `item` was successfully enqueued.
+    /// - `Err(item)` — the queue is full (or the slot was concurrently
+    ///   occupied), and the caller retains ownership of `item`. This path
+    ///   never blocks or spins.
     #[inline(always)]
     pub fn push(&self, item: T) -> Result<(), T> {
         let tail = self.tail.load(Ordering::Relaxed);
@@ -92,10 +138,22 @@ impl<T> BoundedQueue<T> {
         Ok(())
     }
 
-    /// Try to dequeue one item.
+    /// Attempts a wait-free single-consumer dequeue.
     ///
-    /// Single-consumer: only one thread should call this.
-    /// Reads from `head`, returns `None` if the slot is not yet READY.
+    /// Inspects the slot at `head`. If its state is `READY` the item is moved
+    /// out, the slot is reset to `EMPTY`, and `head` is advanced by one.
+    ///
+    /// # Single-consumer contract
+    ///
+    /// **Only one thread may call `pop` at a time.** Concurrent calls from
+    /// multiple threads will produce undefined behaviour because the head
+    /// cursor is not protected by any mutual-exclusion mechanism — it is
+    /// advanced non-atomically across the read–reset–increment sequence.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(item)` — an item was dequeued.
+    /// - `None` — the queue is empty (the next slot is not yet `READY`).
     #[inline(always)]
     pub fn pop(&self) -> Option<T> {
         let idx = self.head.load(Ordering::Relaxed) & self.mask;

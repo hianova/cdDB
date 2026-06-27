@@ -4,43 +4,85 @@ use alloc::vec::Vec;
 use alloc::format;
 use crate::partition::MultiVectorPointer;
 
-/// cdDB 支援的資料類型
+/// A dynamically typed value that can be stored in a cdDB column.
+///
+/// cdDB columns are schema-flexible: each attribute key can hold one of three
+/// concrete value kinds.  The variant chosen at write time determines which
+/// [`Attributes`] bucket the value is placed into and how it is encoded on
+/// disk.
 #[derive(Clone, Debug)]
 pub enum ColumnValue {
+    /// A UTF-8 string value.
     Str(String),
+    /// An unsigned 32-bit integer value.
     Int(u32),
+    /// An arbitrary binary blob.
     Blob(Vec<u8>),
 }
 
-/// 寫入指令屬性封裝
+/// A typed attribute map used to carry named key-value pairs for write commands.
+///
+/// `Attributes<V>` is a thin newtype wrapper around [`AHashMap<String, V>`].
+/// Three concrete instantiations are used throughout cdDB:
+///
+/// | Type parameter | Stored values |
+/// |---|---|
+/// | `String`  | UTF-8 string attributes |
+/// | `u32`     | Unsigned integer attributes |
+/// | `Vec<u8>` | Binary blob attributes |
+///
+/// The separation allows each attribute kind to be encoded and decoded
+/// independently without boxing or runtime type dispatch.
 #[derive(Clone, Debug, Default)]
 pub struct Attributes<V>(AHashMap<String, V>);
 
 impl<V> Attributes<V> {
+    /// Creates a new, empty attribute map.
     pub fn new() -> Self {
         Self(AHashMap::default())
     }
 
+    /// Inserts a key-value pair into the map.
+    ///
+    /// If the map already contains an entry for `key`, the old value is
+    /// silently replaced.
     pub fn insert(&mut self, key: String, value: V) {
         self.0.insert(key, value);
     }
 
+    /// Returns a reference to the value associated with `key`, or `None` if
+    /// no such key exists.
     pub fn get(&self, key: &str) -> Option<&V> {
         self.0.get(key)
     }
 
+    /// Returns a reference to the underlying [`AHashMap`].
     pub fn inner(&self) -> &AHashMap<String, V> {
         &self.0
     }
 
+    /// Returns the number of key-value pairs in the map.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Returns `true` if the map contains no entries.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// Serializes the attribute map into `buf` using a caller-supplied value
+    /// encoder.
+    ///
+    /// The binary layout is:
+    /// ```text
+    /// [entry_count: u32 LE]
+    /// for each entry:
+    ///   [key_len: u32 LE][key_bytes: UTF-8][value: encoded by val_encoder]
+    /// ```
+    ///
+    /// `val_encoder` receives a reference to the value and the output buffer;
+    /// it is responsible for appending the encoded value bytes.
     pub fn encode_to(&self, buf: &mut Vec<u8>, val_encoder: fn(&V, &mut Vec<u8>)) {
         buf.extend_from_slice(&(self.0.len() as u32).to_le_bytes());
         for (k, v) in &self.0 {
@@ -50,6 +92,16 @@ impl<V> Attributes<V> {
         }
     }
 
+    /// Deserializes an attribute map from `buf` starting at `*pos`, advancing
+    /// `*pos` past the consumed bytes.
+    ///
+    /// `val_decoder` is responsible for reading a single value from `buf`
+    /// starting at the cursor position and advancing the cursor accordingly.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(Self)` on success, or `None` if the buffer is too short,
+    /// the entry count is inconsistent, or any key is not valid UTF-8.
     pub fn decode_from(
         buf: &[u8],
         pos: &mut usize,
@@ -85,7 +137,11 @@ impl<V> IntoIterator for Attributes<V> {
     }
 }
 
-/// 寫入指令列舉 (持久化用)
+/// A write command that can be applied to a cdDB partition and persisted to
+/// the Write-Ahead Log (WAL).
+///
+/// Each variant maps to a distinct WAL type-ID byte (`0`–`3`) and is
+/// round-trippable through [`WriteCommand::encode`] / [`WriteCommand::decode`].
 #[derive(Clone, Debug)]
 pub enum WriteCommand {
     /// Insert a standard entity with dynamically typed attributes.
@@ -99,7 +155,9 @@ pub enum WriteCommand {
         /// Blob attributes.
         attributes_blob: Attributes<Vec<u8>>,
     },
-    /// Batch insert multiple standard entities.
+    /// Batch insert multiple standard entities in a single WAL record.
+    ///
+    /// Each tuple contains `(entity_id, string_attrs, int_attrs, blob_attrs)`.
     BatchInsert(Vec<(usize, Attributes<String>, Attributes<u32>, Attributes<Vec<u8>>)>),
     /// Delete an entity.
     Delete {
@@ -120,7 +178,24 @@ pub enum WriteCommand {
 }
 
 impl WriteCommand {
-    /// Helper function to create an Insert command from typed attributes.
+    /// Constructs a [`WriteCommand::Insert`] from a heterogeneous attribute map.
+    ///
+    /// Iterates over `typed_attrs` and routes each entry to the appropriate
+    /// typed bucket (`attributes`, `attributes_int`, or `attributes_blob`)
+    /// based on its [`ColumnValue`] variant.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use cddb::commands::{WriteCommand, ColumnValue};
+    /// use cddb::AHashMap;
+    ///
+    /// let mut attrs = AHashMap::default();
+    /// attrs.insert("name".to_string(), ColumnValue::Str("Alice".to_string()));
+    /// attrs.insert("age".to_string(), ColumnValue::Int(30));
+    ///
+    /// let cmd = WriteCommand::insert(42, attrs);
+    /// ```
     pub fn insert(
         entity_id: usize,
         typed_attrs: AHashMap<String, ColumnValue>,
@@ -145,7 +220,20 @@ impl WriteCommand {
         }
     }
 
-    /// Encodes the command into a byte buffer for WAL persistence.
+    /// Encodes the command into a byte buffer suitable for WAL persistence.
+    ///
+    /// The first byte is a type discriminant:
+    ///
+    /// | Byte | Variant |
+    /// |---|---|
+    /// | `0` | [`WriteCommand::Insert`] |
+    /// | `1` | [`WriteCommand::BatchInsert`] |
+    /// | `2` | [`WriteCommand::Delete`] |
+    /// | `3` | [`WriteCommand::InsertFast`] |
+    ///
+    /// All multi-byte integers are little-endian.  The returned buffer can be
+    /// passed directly to [`WriteCommand::decode`] to recover the original
+    /// command.
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
@@ -203,7 +291,15 @@ impl WriteCommand {
         buf
     }
 
-    /// Decodes a command from a byte buffer.
+    /// Decodes a [`WriteCommand`] from a byte buffer previously produced by
+    /// [`WriteCommand::encode`].
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(cmd)` when decoding succeeds, or `None` if:
+    /// - `buf` is empty or too short for the declared payload,
+    /// - the type-discriminant byte is not in the range `0`–`3`, or
+    /// - any UTF-8 key cannot be decoded.
     pub fn decode(buf: &[u8]) -> Option<Self> {
         let mut pos = 0;
         let type_id = *buf.get(pos)?;
@@ -302,7 +398,7 @@ impl<T: Send + 'static> ResponseSender<T> for std::sync::mpsc::SyncSender<T> {
     }
 }
 
-/// 內部指令列舉 (同步溝通用)
+/// Internal command enum used for synchronous communication with partition background threads.
 pub enum PartitionCommand {
     /// A regular write command (Insert/Delete).
     Write(WriteCommand),
@@ -366,8 +462,19 @@ pub struct ITOpsRecord {
 }
 
 impl ITOpsRecord {
-    /// Converts the structured record into cdDB compatible attributes.
-    /// Usage percentages are scaled by 1000 for precision in u32.
+    /// Converts the structured record into a pair of cdDB-compatible attribute
+    /// maps ready for use in a [`WriteCommand::Insert`].
+    ///
+    /// String attributes returned: `service`, `node`, `level`, `message`.
+    ///
+    /// Integer (`u32`) attributes returned:
+    /// - `timestamp` — the Unix timestamp, truncated to `u32::MAX` via `%`.
+    /// - `cpu_milli` — `cpu_usage × 1000` cast to `u32` (e.g. `0.75` → `750`).
+    /// - `mem_milli` — `mem_usage × 1000` cast to `u32` (e.g. `0.60` → `600`).
+    /// - `response_time` — `response_time_ms` as-is.
+    ///
+    /// The `× 1000` scaling preserves three decimal places of precision for
+    /// floating-point usage ratios within the integer attribute store.
     pub fn to_cd_db_params(&self) -> (Attributes<String>, Attributes<u32>) {
         let mut attrs = AHashMap::default();
         attrs.insert("service".to_string(), self.service.clone());
@@ -477,10 +584,44 @@ mod tests {
     }
 
     #[test]
+    fn test_write_command_insert_helper() {
+        use crate::commands::ColumnValue;
+        let mut attrs = crate::AHashMap::default();
+        attrs.insert("s".to_string(), ColumnValue::Str("foo".to_string()));
+        attrs.insert("i".to_string(), ColumnValue::Int(42));
+        attrs.insert("b".to_string(), ColumnValue::Blob(vec![1, 2]));
+
+        let cmd = WriteCommand::insert(99, attrs);
+        if let WriteCommand::Insert { entity_id, attributes, attributes_int, attributes_blob } = cmd {
+            assert_eq!(entity_id, 99);
+            assert_eq!(attributes.get("s"), Some(&"foo".to_string()));
+            assert_eq!(attributes_int.get("i"), Some(&42));
+            assert_eq!(attributes_blob.get("b"), Some(&vec![1, 2]));
+        } else {
+            panic!("Expected Insert");
+        }
+    }
+
+    #[test]
+    fn test_decode_invalid() {
+        assert!(WriteCommand::decode(&[]).is_none());
+        assert!(WriteCommand::decode(&[4]).is_none()); // Invalid variant
+    }
+
+    #[test]
     fn test_partition_command_debug() {
         let cmd = PartitionCommand::Shutdown;
         let s = format!("{:?}", cmd);
         assert_eq!(s, "Shutdown");
+
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        let internal_load = PartitionCommand::InternalLoad {
+            entity_id: 42,
+            response_tx: alloc::boxed::Box::new(tx),
+        };
+        let s = format!("{:?}", internal_load);
+        assert!(s.contains("InternalLoad"));
+        assert!(s.contains("entity_id: 42"));
     }
 
     #[test]
@@ -500,19 +641,71 @@ mod tests {
             panic!("Failed fast insert");
         }
 
+        let mut attrs_str = Attributes::new();
+        attrs_str.insert("k".to_string(), "v".to_string());
+        let mut attrs_int = Attributes::new();
+        attrs_int.insert("num".to_string(), 100);
+        let mut attrs_blob = Attributes::new();
+        attrs_blob.insert("data".to_string(), vec![255]);
+
         let batch = WriteCommand::BatchInsert(vec![(
             5,
-            Attributes::new(),
-            Attributes::new(),
-            Attributes::new(),
+            attrs_str,
+            attrs_int,
+            attrs_blob,
         )]);
         let enc_batch = batch.encode();
         let dec_batch = WriteCommand::decode(&enc_batch).unwrap();
         if let WriteCommand::BatchInsert(items) = dec_batch {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].0, 5);
+            assert_eq!(items[0].1.get("k"), Some(&"v".to_string()));
+            assert_eq!(items[0].2.get("num"), Some(&100));
+            assert_eq!(items[0].3.get("data"), Some(&vec![255]));
         } else {
             panic!("Failed batch insert");
         }
     }
+
+    #[test]
+    fn test_write_command_extra_variants() {
+        // Test LogLevel Debug format
+        assert_eq!(format!("{:?}", LogLevel::Info), "Info");
+        assert_eq!(format!("{:?}", LogLevel::Warn), "Warn");
+        assert_eq!(format!("{:?}", LogLevel::Error), "Error");
+        assert_eq!(format!("{:?}", LogLevel::Fatal), "Fatal");
+        assert_eq!(format!("{:?}", LogLevel::Debug), "Debug");
+
+        // Test WriteCommand::Delete encode/decode
+        let del = WriteCommand::Delete { entity_id: 123 };
+        let enc_del = del.encode();
+        let dec_del = WriteCommand::decode(&enc_del).unwrap();
+        if let WriteCommand::Delete { entity_id } = dec_del {
+            assert_eq!(entity_id, 123);
+        } else {
+            panic!("Delete decode failed");
+        }
+
+        // Test PartitionCommand formatting
+        assert_eq!(format!("{:?}", PartitionCommand::Write(WriteCommand::Delete { entity_id: 1 })), "Write(Delete { entity_id: 1 })");
+        
+        // Test Attributes::into_iter
+        let mut attrs = Attributes::new();
+        attrs.insert("x".to_string(), "y".to_string());
+        let mut count = 0;
+        for (k, v) in attrs {
+            assert_eq!(k, "x");
+            assert_eq!(v, "y");
+            count += 1;
+        }
+        assert_eq!(count, 1);
+
+        // Test From<AHashMap> for Attributes
+        let mut map = crate::AHashMap::default();
+        map.insert("a".to_string(), 1);
+        let attrs_from = Attributes::from(map);
+        assert_eq!(attrs_from.get("a"), Some(&1));
+    }
 }
+
+

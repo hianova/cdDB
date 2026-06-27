@@ -25,34 +25,163 @@ use crate::wal::{WalProvider, NoopWal};
 use crate::wal::StdWal;
 #[cfg(feature = "std")]
 use crate::commands::{PartitionCommand, WriteCommand};
+/// A metrics snapshot for a single partition, captured at a point-in-time
+/// without holding any locks.
+///
+/// Returned as part of [`DbMetrics`] by [`CdDBDispatcher::metrics()`].
+#[derive(Debug, Clone)]
+pub struct PartitionMetrics {
+    /// Human-readable name that was supplied when the partition was registered
+    /// (e.g. `"users"` or `"events.2024"`).
+    pub name: String,
+    /// Monotonically-increasing numeric ID assigned to the partition at
+    /// registration time. Used internally to scope cache keys and WAL entries.
+    pub partition_id: u32,
+    /// Fraction of Bloom-filter bits that are currently set, in the range
+    /// `[0.0, 1.0]`. A value close to `1.0` indicates the filter is nearly
+    /// saturated and false-positive rates may be increasing.
+    pub bloom_saturation: f32,
+    /// Number of entity records currently resident in the partition's in-memory
+    /// index (i.e. the size of the shared multi-vector pointer map).
+    pub memory_entities: usize,
+}
 
-/// 4. cdDB 全域入口與調度器 (Dispatcher)
+/// A full, lock-free snapshot of database-engine metrics returned by
+/// [`CdDBDispatcher::metrics()`].
+///
+/// All values are best-effort: atomics are read with `Relaxed` or `Acquire`
+/// ordering and no global lock is held, so individual fields may reflect
+/// slightly different instants in time.
+#[derive(Debug, Clone)]
+pub struct DbMetrics {
+    /// `true` if the dispatcher has been placed into sleep mode via
+    /// [`CdDBDispatcher::sleep()`].
+    pub is_sleeping: bool,
+    /// Per-partition metrics, one entry for each partition currently
+    /// registered in the route table.
+    pub partitions: Vec<PartitionMetrics>,
+
+    // Cache metrics
+    /// `true` when the `dualcache-ff` feature is compiled in and the global
+    /// cache is active; `false` otherwise.
+    pub cache_enabled: bool,
+    /// `true` while the cache is still in its cold-start warm-up phase (before
+    /// the first epoch boundary after [`CdDBDispatcher::prewarm_partition()`]).
+    pub cache_is_cold_start: bool,
+    /// Number of telemetry / admission commands currently enqueued for the
+    /// background cache daemon (only meaningful in `std` builds).
+    pub cache_pending_commands: usize,
+    /// Current eviction epoch counter maintained by the `DualCacheFF` daemon.
+    pub cache_epoch: u32,
+    /// Number of entries in the Hot Tier (T1 — recently promoted).
+    pub cache_t1_count: usize,
+    /// Number of entries in the Warm Tier (T2 — frequency-qualified).
+    pub cache_t2_count: usize,
+    /// Number of entries in the Core resident set.
+    pub cache_core_count: usize,
+}
+
+/// The top-level database engine entry point and central dispatcher for cdDB.
+///
+/// `CdDBDispatcher<N>` is responsible for:
+/// - Maintaining a **route table** that maps partition names to their
+///   [`PartitionRoute<N>`] contexts.
+/// - Spawning and managing per-partition background worker threads (in `std`
+///   builds) that process write commands through a lock-free bounded queue.
+/// - Providing a unified read API ([`execute_batch`](Self::execute_batch),
+///   [`get_route`](Self::get_route)) under a single QSBR pin per call batch.
+/// - Exposing operational knobs: cache sync, pre-warming, sleep/wake, and
+///   lock-free metrics.
+///
+/// # Type parameter `N`
+///
+/// `N` is the const generic that controls the size of each partition's Bloom
+/// filter bit-array. A larger `N` reduces false-positive rates at the cost of
+/// more memory. `N` must be chosen at compile time and is uniform across all
+/// partitions owned by a single dispatcher instance.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # #[cfg(feature = "std")] {
+/// use cddb::CdDBDispatcher;
+///
+/// // Create a dispatcher backed by the standard filesystem.
+/// let mut db = CdDBDispatcher::<1024>::new_std(Some("./data".into()));
+///
+/// // Register a partition and obtain a writer handle.
+/// let writer = db.register_partition("users".into());
+/// # }
+/// ```
 pub struct CdDBDispatcher<const N: usize> {
-    /// A mapping from partition names to their route contexts.
+    /// Mapping from partition name to its shared [`PartitionRoute<N>`] context.
+    /// The route carries everything a read query needs (columns, bloom filter,
+    /// cache, storage, WAL) and is cheaply `Arc`-cloned for concurrent access.
     pub route_table: AHashMap<String, Arc<PartitionRoute<N>>>,
-    /// The base directory path for storage.
+    /// Optional base directory under which partition storage sub-directories
+    /// are created. When `None`, paths are resolved relative to the process
+    /// working directory.
     pub base_path: Option<String>,
-    /// Thread-safe pointer to the linked list of active worker nodes (QSBR).
+    /// Atomic pointer to the head of the global QSBR worker linked-list.
+    /// Every reader thread registers itself here so the write path can
+    /// determine when it is safe to free old data generations.
     pub workers: Arc<AtomicPtr<WorkerNode>>,
-    /// File system abstraction for storage operations.
+    /// Abstract file-system interface used for all storage I/O. Swap this out
+    /// with a custom implementation to run cdDB in embedded or WASM
+    /// environments without touching any other code.
     pub fs: Arc<dyn FileSystem>,
-    /// Executor for spawning background tasks (e.g. partition threads).
+    /// Abstract task executor used to spawn per-partition background threads.
+    /// The default `StdExecutor` uses `std::thread::spawn`; a custom
+    /// implementation can map tasks onto any async runtime or RTOS task.
     pub executor: Arc<dyn Executor>,
-    /// A global memory cache shared across partitions.
+    /// Global `DualCacheFF` hot-index shared by **all** partitions.
+    /// Cache keys are `(partition_id, entity_id)` tuples, ensuring isolation
+    /// between partitions while allowing the eviction policy to see the full
+    /// cross-partition access distribution.
     pub global_cache: Arc<DualCacheFF<(u32, usize), ()>>,
-    /// Counter to generate unique IDs for new partitions.
+    /// Monotonically increasing counter used to assign a unique `u32` ID to
+    /// each registered partition. Incremented once per
+    /// [`register_partition_with_wal_provider`](Self::register_partition_with_wal_provider)
+    /// call.
     pub next_partition_id: u32,
-    /// Active daemon thread join handle for the global cache.
-    #[cfg(feature = "std")]
-    #[cfg(feature = "dualcache-ff")]
-    pub daemon_handle: Option<std::thread::JoinHandle<()>>,
-    /// Flag indicating whether the dispatcher is currently in a "sleeping" state.
-    /// This acts as a unified switch for upper-layer applications to check.
+    /// Atomic boolean that controls the logical sleep state of the dispatcher.
+    /// When `true`, upper-layer traffic handlers should pause incoming writes.
+    /// Background maintenance threads observe this flag to enter low-power
+    /// idle polling rather than being fully terminated.
     pub is_sleeping: Arc<core::sync::atomic::AtomicBool>,
 }
 
 impl<const N: usize> CdDBDispatcher<N> {
     /// Create a new `CdDBDispatcher` with a custom file system and executor.
+    ///
+    /// Use this constructor when targeting environments that do not have access
+    /// to the Rust standard library (e.g. embedded, WASM) or when you need to
+    /// inject a mock filesystem for testing.
+    ///
+    /// # Arguments
+    ///
+    /// * `base_path` — Optional root directory under which per-partition
+    ///   storage sub-directories are created. Pass `None` to resolve paths
+    ///   relative to the process working directory.
+    /// * `fs` — File-system abstraction used for all I/O. The default
+    ///   standard-library implementation is [`StdFileSystem`].
+    /// * `executor` — Task spawner used to launch per-partition background
+    ///   threads. The default is [`StdExecutor`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # #[cfg(feature = "std")] {
+    /// use std::sync::Arc;
+    /// use cddb::{CdDBDispatcher, platform::{StdFileSystem, StdExecutor}};
+    ///
+    /// let db = CdDBDispatcher::<512>::new(
+    ///     Some("./db_data".into()),
+    ///     Arc::new(StdFileSystem),
+    ///     Arc::new(StdExecutor),
+    /// );
+    /// # }
+    /// ```
     pub fn new(
         base_path: Option<String>,
         fs: Arc<dyn FileSystem>,
@@ -62,17 +191,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         let cache_config = Config::with_memory_budget(100, 60);
 
         #[cfg(feature = "dualcache-ff")]
-        let (global_cache, daemon) = DualCacheFF::new_headless(cache_config);
-
-        #[cfg(feature = "dualcache-ff")]
-        #[cfg(feature = "std")]
-        let daemon_handle = Some(std::thread::spawn(move || {
-            daemon.run();
-        }));
-
-        #[cfg(feature = "dualcache-ff")]
-        #[cfg(not(feature = "std"))]
-        let _ = daemon;
+        let global_cache = DualCacheFF::new(cache_config);
 
         #[cfg(not(feature = "dualcache-ff"))]
         let global_cache = DualCacheFF::new(Config);
@@ -85,14 +204,30 @@ impl<const N: usize> CdDBDispatcher<N> {
             executor,
             global_cache: Arc::new(global_cache),
             next_partition_id: 0,
-            #[cfg(feature = "std")]
-            #[cfg(feature = "dualcache-ff")]
-            daemon_handle,
             is_sleeping: Arc::new(core::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    /// Create a new `CdDBDispatcher` using the standard library's file system and executor.
+    /// Convenience constructor that creates a `CdDBDispatcher` backed by the
+    /// standard library's [`StdFileSystem`] and [`StdExecutor`].
+    ///
+    /// This is the recommended entry point for applications running in a normal
+    /// `std` environment. For custom environments use [`CdDBDispatcher::new`].
+    ///
+    /// # Arguments
+    ///
+    /// * `base_path` — Optional root directory for partition storage. Pass
+    ///   `None` to use `"data/<partition_name>"` relative paths.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # #[cfg(feature = "std")] {
+    /// use cddb::CdDBDispatcher;
+    ///
+    /// let db = CdDBDispatcher::<512>::new_std(Some("./db_data".into()));
+    /// # }
+    /// ```
     #[cfg(feature = "std")]
     pub fn new_std(base_path: Option<String>) -> Self {
         Self::new(
@@ -102,13 +237,45 @@ impl<const N: usize> CdDBDispatcher<N> {
         )
     }
 
-    /// Register a new partition with the given path, using the default synchronous WAL.
+    /// Register a new partition with the given name using the default
+    /// synchronous WAL (no WAL file — equivalent to `WalMode::Sync` with
+    /// `wal_path = None`).
+    ///
+    /// A background worker thread is spawned automatically to process write
+    /// commands for this partition. The returned [`UserWriter`] is the only
+    /// handle through which callers should send [`WriteCommand`]s to the
+    /// partition. When the `UserWriter` is dropped, a `Shutdown` command is
+    /// delivered to gracefully stop the background thread.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` — Logical name of the partition (e.g. `"users"`). This name
+    ///   is also used to derive the on-disk storage sub-directory path.
+    ///
+    /// # Returns
+    ///
+    /// A [`UserWriter`] bound to the newly created partition's command queue.
     #[cfg(feature = "std")]
     pub fn register_partition(&mut self, path: String) -> UserWriter {
         self.register_partition_with_wal(path, None, crate::wal::WalMode::Sync)
     }
 
-    /// Register a new partition with a specific memory budget.
+    /// Register a new partition with an explicit memory budget hint.
+    ///
+    /// Behaves identically to [`register_partition`](Self::register_partition)
+    /// in the current implementation; the `budget_bytes` parameter is accepted
+    /// for API compatibility but is not yet enforced. Future versions may use
+    /// it to constrain the partition's in-memory column footprint.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` — Logical name / storage path of the partition.
+    /// * `_budget_bytes` — Desired maximum resident memory in bytes (currently
+    ///   advisory only).
+    ///
+    /// # Returns
+    ///
+    /// A [`UserWriter`] bound to the newly created partition's command queue.
     #[cfg(feature = "std")]
     pub fn register_partition_with_budget(
         &mut self,
@@ -118,7 +285,24 @@ impl<const N: usize> CdDBDispatcher<N> {
         self.register_partition_with_wal(path, None, crate::wal::WalMode::Sync)
     }
 
-    /// Register a new partition, specifying a custom WAL path and mode.
+    /// Register a new partition, specifying an optional WAL file path and
+    /// write mode.
+    ///
+    /// When `wal_path` is `Some`, a [`StdWal`] is created at the given path
+    /// with the supplied [`WalMode`]. When `wal_path` is `None`, a [`NoopWal`]
+    /// is used and no durability log is written.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` — Logical name of the partition.
+    /// * `wal_path` — Optional file path for the write-ahead log. `None`
+    ///   disables WAL entirely.
+    /// * `wal_mode` — Controls WAL flush strategy (e.g. sync-on-every-write
+    ///   vs. async/batched). Only meaningful when `wal_path` is `Some`.
+    ///
+    /// # Returns
+    ///
+    /// A [`UserWriter`] bound to the newly created partition's command queue.
     #[cfg(feature = "std")]
     pub fn register_partition_with_wal(
         &mut self,
@@ -134,7 +318,31 @@ impl<const N: usize> CdDBDispatcher<N> {
         self.register_partition_with_wal_provider(path, wal)
     }
 
-    /// Register a new partition with a custom `WalProvider`.
+    /// Register a new partition with a fully custom [`WalProvider`].
+    ///
+    /// This is the lowest-level registration method. All other
+    /// `register_partition*` variants ultimately delegate here. Use this
+    /// method when you need complete control over the WAL implementation
+    /// (e.g. an in-memory WAL for tests, or a network-backed log).
+    ///
+    /// Internally, the method:
+    /// 1. Allocates a lock-free [`BoundedQueue`] (capacity 262 144 slots).
+    /// 2. Initialises a [`PartitionRoute<N>`] and inserts it into the route
+    ///    table.
+    /// 3. Spawns a background thread via the configured executor that runs
+    ///    the partition event loop, replaying the WAL on startup.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` — Logical name / storage path of the partition.
+    /// * `wal` — A shared [`WalProvider`] implementation. Pass
+    ///   `Arc::new(NoopWal)` to disable durability logging.
+    ///
+    /// # Returns
+    ///
+    /// A [`UserWriter`] bound to the partition's command queue. Dropping the
+    /// writer delivers a `Shutdown` command, causing the background thread to
+    /// exit cleanly.
     #[cfg(feature = "std")]
     pub fn register_partition_with_wal_provider(
         &mut self,
@@ -178,6 +386,26 @@ impl<const N: usize> CdDBDispatcher<N> {
         UserWriter(writer_tx_out)
     }
 
+    /// Register a new partition in `no_std` environments where thread
+    /// spawning is not available.
+    ///
+    /// Unlike the `std` `register_partition*` family, this method does **not**
+    /// spawn a background thread. Instead, the caller is responsible for
+    /// driving the partition's event loop manually — typically inside an RTOS
+    /// task or a bare-metal super-loop — by polling the `_writer_rx` queue and
+    /// dispatching [`PartitionCommand`]s to a [`Partition`] instance.
+    ///
+    /// A [`PartitionRoute<N>`] is created and inserted into the route table so
+    /// that read queries can be executed through the dispatcher as usual.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` — Logical name of the partition.
+    /// * `writer_tx` — The sending half of the application's command channel.
+    ///   This is stored in the route and used by [`UserWriter`]-equivalent
+    ///   logic to push [`WriteCommand`]s.
+    /// * `_writer_rx` — The receiving half (currently unused by this method;
+    ///   pass it to your partition event loop separately).
     #[cfg(not(feature = "std"))]
     pub fn register_partition_no_std(
         &mut self,
@@ -259,9 +487,20 @@ impl<const N: usize> CdDBDispatcher<N> {
         }));
     }
 
-    /// Get the route context for a partition by name, allowing queries to be executed.
     pub fn get_route(&self, partition_name: &str) -> Option<Arc<PartitionRoute<N>>> {
         self.route_table.get(partition_name).cloned()
+    }
+
+    /// Exposes a high-level `CdDBPartition` handle wrapping queries and writes.
+    #[cfg(feature = "std")]
+    pub fn get_partition(&self, name: &str) -> Option<crate::facade::CdDBPartition<'_, N>> {
+        let route = self.get_route(name)?;
+        let writer = UserWriter(route.writer_tx.clone());
+        Some(crate::facade::CdDBPartition {
+            name: name.into(),
+            writer,
+            dispatcher: self,
+        })
     }
 
     /// Execute a batch of query nodes against a named partition under a single
@@ -286,7 +525,32 @@ impl<const N: usize> CdDBDispatcher<N> {
         }
     }
 
-    /// Execute a batch of query nodes asynchronously.
+    /// Execute a batch of query nodes against a named partition asynchronously,
+    /// offloading the QSBR-pinned read work to a Tokio blocking thread pool.
+    ///
+    /// This is the async equivalent of [`execute_batch`](Self::execute_batch).
+    /// Because QSBR operations must not be suspended across `.await` points,
+    /// the actual query execution runs inside `tokio::task::spawn_blocking`
+    /// and the future resolves once the blocking task completes.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` — Name of the target partition. If the partition is not
+    ///   found in the route table, `None` is returned.
+    /// * `nodes` — Query nodes to execute. Must have `'static` lifetime so
+    ///   they can be moved into the blocking task.
+    /// * `cb` — Callback invoked for each [`QueryResult`]. The return value
+    ///   of the **last** invocation is returned as `Some(R)`.
+    ///
+    /// # Returns
+    ///
+    /// `Some(R)` containing the result of the final callback invocation, or
+    /// `None` if the partition was not found or no nodes were executed.
+    ///
+    /// # Errors
+    ///
+    /// Panics if the spawned Tokio blocking task panics (propagated via
+    /// `JoinHandle::await.unwrap()`).
     #[cfg(all(feature = "std", feature = "async"))]
     pub async fn execute_batch_async<'b, F, R>(
         &self,
@@ -313,20 +577,161 @@ impl<const N: usize> CdDBDispatcher<N> {
         }
     }
 
-    /// Puts the dispatcher into a logical "sleep" state.
-    /// In this mode, background maintenance daemons are NOT killed to avoid high latency overhead,
-    /// but they naturally fall into minimal-execution idle polling (e.g. 1ms interval, 0 CPU).
-    /// This simply toggles the `is_sleeping` flag which upper applications can use to pause traffic.
+    /// Returns a lock-free, point-in-time snapshot of database-engine metrics.
+    ///
+    /// Iterates over every registered partition to compute its Bloom-filter
+    /// saturation and in-memory entity count, then reads global cache counters
+    /// using atomic loads (no mutexes are held).
+    ///
+    /// # Returns
+    ///
+    /// A [`DbMetrics`] struct containing per-partition [`PartitionMetrics`] and
+    /// global cache statistics.
+    pub fn metrics(&self) -> DbMetrics {
+        let is_sleeping = self.is_sleeping();
+        
+        let mut partitions = Vec::with_capacity(self.route_table.len());
+        for (name, route) in self.route_table.iter() {
+            let bloom = crate::unsafe_core::load_ref(&route.bloom_filter);
+            let total = bloom.total_bits() as f32;
+            let set = bloom.count_set_bits() as f32;
+            let saturation = if total > 0.0 { set / total } else { 0.0 };
+            
+            let shared = crate::unsafe_core::load_ref(&route.shared_pointers);
+            
+            partitions.push(PartitionMetrics {
+                name: name.clone(),
+                partition_id: route.partition_id,
+                bloom_saturation: saturation,
+                memory_entities: shared.len(),
+            });
+        }
+
+        #[cfg(feature = "dualcache-ff")]
+        let (cache_enabled, cache_is_cold_start, cache_pending_commands, cache_epoch, cache_t1_count, cache_t2_count, cache_core_count) = {
+            #[cfg(feature = "std")]
+            {
+                let (t1, t2, core) = self.global_cache.entry_count();
+                (
+                    true,
+                    self.global_cache.is_cold_start.load(core::sync::atomic::Ordering::Relaxed),
+                    self.global_cache.cmd_tx.len(),
+                    self.global_cache.epoch.load(core::sync::atomic::Ordering::Relaxed),
+                    t1,
+                    t2,
+                    core,
+                )
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                let (t1, t2, core) = self.global_cache.entry_count();
+                (
+                    true,
+                    self.global_cache.is_cold_start.load(core::sync::atomic::Ordering::Relaxed),
+                    0,
+                    self.global_cache.epoch.load(core::sync::atomic::Ordering::Relaxed),
+                    t1,
+                    t2,
+                    core,
+                )
+            }
+        };
+
+        #[cfg(not(feature = "dualcache-ff"))]
+        let (cache_enabled, cache_is_cold_start, cache_pending_commands, cache_epoch, cache_t1_count, cache_t2_count, cache_core_count) = 
+            (false, false, 0, 0, 0, 0, 0);
+
+        DbMetrics {
+            is_sleeping,
+            partitions,
+            cache_enabled,
+            cache_is_cold_start,
+            cache_pending_commands,
+            cache_epoch,
+            cache_t1_count,
+            cache_t2_count,
+            cache_core_count,
+        }
+    }
+
+    /// Pre-warm the cache for a specific partition with a batch of entity IDs.
+    /// This bypasses standard probation and injects keys directly into the Hot Tier (T1),
+    /// which is highly efficient for application startup sequences.
+    #[allow(unused_variables)]
+    pub fn prewarm_partition(&self, partition_name: &str, entity_ids: impl IntoIterator<Item = usize>) -> Result<(), &'static str> {
+        let route = self.get_route(partition_name).ok_or("Partition not found")?;
+        let partition_id = route.partition_id;
+        
+        #[cfg(feature = "dualcache-ff")]
+        {
+            #[cfg(feature = "std")]
+            {
+                let items = entity_ids.into_iter().map(|id| ((partition_id, id), ()));
+                self.global_cache.begin_cold_start_session().warmup_batch(items);
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                let items = entity_ids.into_iter().map(|id| ((partition_id, id), ()));
+                self.global_cache.warmup(items);
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Flush all pending thread-local telemetry and cache admission commands,
+    /// blocking the calling thread until the background `DualCacheFF` daemon
+    /// has processed them.
+    ///
+    /// Call this after a burst of writes or reads to ensure the hot-index
+    /// reflects the most recent access pattern before issuing queries that
+    /// depend on cache residency (e.g. in tests or benchmark warm-up phases).
+    ///
+    /// This is a **no-op** when compiled without the `dualcache-ff` feature or
+    /// in `no_std` environments where the daemon thread does not exist.
+    pub fn sync_cache(&self) {
+        #[cfg(feature = "dualcache-ff")]
+        {
+            self.global_cache.sync();
+        }
+    }
+
+    /// Put the dispatcher into a logical sleep state.
+    ///
+    /// Sets the `is_sleeping` flag to `true` and, when the `dualcache-ff`
+    /// feature is active, suspends the background cache daemon so it enters
+    /// low-power idle polling (approximately 1 ms intervals, effectively
+    /// zero CPU).
+    ///
+    /// Background threads are **not** terminated; the transition is
+    /// intentionally lightweight to avoid the high latency cost of tearing
+    /// down and recreating OS threads.
+    ///
+    /// Upper-layer traffic handlers should check [`is_sleeping`](Self::is_sleeping)
+    /// before accepting new writes. Wake the dispatcher again with
+    /// [`wake`](Self::wake).
     pub fn sleep(&self) {
         self.is_sleeping.store(true, core::sync::atomic::Ordering::Release);
+        #[cfg(feature = "dualcache-ff")]
+        self.global_cache.suspend();
     }
 
-    /// Wakes up the dispatcher from logical "sleep" state.
+    /// Wake the dispatcher from a logical sleep state.
+    ///
+    /// Clears the `is_sleeping` flag and, when the `dualcache-ff` feature is
+    /// active, resumes the background cache daemon so it returns to normal
+    /// operation. This is the counterpart of [`sleep`](Self::sleep).
     pub fn wake(&self) {
         self.is_sleeping.store(false, core::sync::atomic::Ordering::Release);
+        #[cfg(feature = "dualcache-ff")]
+        self.global_cache.resume();
     }
 
-    /// Check if the dispatcher is currently sleeping.
+    /// Returns `true` if the dispatcher is currently in the sleep state.
+    ///
+    /// The value is read with `Acquire` ordering so that any writes performed
+    /// by [`sleep`](Self::sleep) or [`wake`](Self::wake) on other threads are
+    /// visible to the caller.
     pub fn is_sleeping(&self) -> bool {
         self.is_sleeping.load(core::sync::atomic::Ordering::Acquire)
     }
@@ -334,14 +739,8 @@ impl<const N: usize> CdDBDispatcher<N> {
 
 impl<const N: usize> Drop for CdDBDispatcher<N> {
     fn drop(&mut self) {
-        #[cfg(feature = "std")]
-        #[cfg(feature = "dualcache-ff")]
-        {
-            if let Some(handle) = self.daemon_handle.take() {
-                let _ = self.global_cache.cmd_tx.try_send(dualcache_ff::daemon::Command::Shutdown);
-                let _ = handle.join();
-            }
-        }
+        // DualCacheFF v1.0.0 will automatically gracefully shutdown when dropped,
+        // so we don't need to manually send Shutdown or join the daemon thread here.
     }
 }
 
@@ -352,12 +751,39 @@ impl<const N: usize> Default for CdDBDispatcher<N> {
     }
 }
 
-/// A writer interface to send write commands to a specific partition.
+/// A handle for sending write commands to a single registered partition.
+///
+/// `UserWriter` wraps the sending end of the partition's lock-free
+/// [`BoundedQueue`] and provides two delivery strategies: a blocking
+/// [`send`](UserWriter::send) with exponential backoff (suitable for
+/// production write paths) and a non-blocking
+/// [`try_send`](UserWriter::try_send) (suitable for rate-limited or
+/// drop-tolerant paths).
+///
+/// When a `UserWriter` is dropped, a `Shutdown` command is automatically
+/// enqueued, causing the partition's background thread to exit cleanly.
 #[cfg(feature = "std")]
+#[derive(Clone)]
 pub struct UserWriter(Arc<BoundedQueue<PartitionCommand>>);
 #[cfg(feature = "std")]
 impl UserWriter {
-    /// Send a write command to the partition asynchronously (blocking with backoff if full).
+    /// Send a write command to the partition, blocking with exponential backoff
+    /// until queue space becomes available.
+    ///
+    /// On each failed push the method calls [`Backoff::snooze`] (spin /
+    /// yield). Once the backoff sequence is exhausted it falls back to
+    /// [`std::thread::yield_now`] on every retry to avoid monopolising the CPU
+    /// while the partition thread drains the queue.
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` — The [`WriteCommand`] to deliver to the partition.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` once the command has been successfully enqueued.
+    /// This function never returns `Err` in practice — it loops indefinitely
+    /// until the push succeeds.
     pub fn send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
         let mut cmd = PartitionCommand::Write(cmd);
         let mut backoff = crate::platform::Backoff::new();
@@ -375,7 +801,20 @@ impl UserWriter {
             }
         }
     }
-    /// Try to send a write command to the partition immediately, returning an error if the queue is full.
+    /// Attempt to send a write command to the partition without blocking.
+    ///
+    /// Performs a single push attempt. If the partition's command queue is
+    /// full the command is **discarded** and `Err("Full")` is returned. This
+    /// is appropriate for callers that implement their own back-pressure or
+    /// are willing to drop writes under load.
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` — The [`WriteCommand`] to attempt to deliver.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err("Full")` if the bounded queue has no available slots.
     pub fn try_send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
         self.0.push(PartitionCommand::Write(cmd)).map_err(|_| "Full")
     }
@@ -392,32 +831,62 @@ impl Drop for UserWriter {
     }
 }
 
-/// The route context for a partition, used to dispatch commands and queries.
+/// Shared read context for a single partition, used to route queries and
+/// write commands.
+///
+/// A `PartitionRoute<N>` is created during partition registration and inserted
+/// into [`CdDBDispatcher::route_table`]. It is cheaply `Arc`-cloned: the
+/// dispatcher, the [`UserWriter`], and every active query thread all hold a
+/// reference to the same route without copying any data.
+///
+/// All pointer fields that are updated by the background write thread (columns,
+/// bloom filter, shared pointers) use RCU-style [`AtomicPtr`] swaps coordinated
+/// by the QSBR epoch mechanism, making reads fully wait-free.
 #[derive(Clone)]
 pub struct PartitionRoute<const N: usize> {
-    /// The name of the partition.
+    /// Human-readable name used to look up this route in
+    /// [`CdDBDispatcher::route_table`].
     pub name: String,
-    /// The unique numeric ID of the partition.
+    /// Unique numeric identifier for this partition, scoped to the
+    /// dispatcher instance. Used to namespace cache keys as
+    /// `(partition_id, entity_id)`.
     pub partition_id: u32,
-    /// The command queue sender for writing to this partition.
+    /// Sending end of the partition's lock-free command queue (`std` build).
+    /// Write commands are pushed here by [`UserWriter::send`] /
+    /// [`UserWriter::try_send`] and drained by the background worker thread.
     #[cfg(feature = "std")]
     pub writer_tx: Arc<BoundedQueue<PartitionCommand>>,
-    /// The command queue sender for writing to this partition (no_std).
+    /// Sending end of the partition's command channel (`no_std` build).
+    /// The concrete type is provided by the application and must implement
+    /// [`MessageSender`](crate::platform::MessageSender).
     #[cfg(not(feature = "std"))]
     pub writer_tx: Arc<dyn crate::platform::MessageSender>,
-    /// Thread-safe pointer to the partition's column arrays.
+    /// RCU pointer to the partition's [`Columns<N>`] store. Readers load this
+    /// atomically while QSBR-pinned; the background thread swaps it after each
+    /// schema-modifying write.
     pub columns: Arc<AtomicPtr<Columns<N>>>,
-    /// Thread-safe pointer to the partition's shared vector pointers.
+    /// RCU pointer to the map from entity ID to [`MultiVectorPointer`], which
+    /// locates an entity's data across all column arrays. Updated atomically
+    /// by the write thread using QSBR epoch synchronisation.
     pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
-    /// Shared global hot index cache.
+    /// Reference to the global [`DualCacheFF`] hot-index shared by all
+    /// partitions. Keyed by `(partition_id, entity_id)` so that cache
+    /// eviction decisions span the full working set.
     pub hot_index: Arc<DualCacheFF<(u32, usize), ()>>,
-    /// Thread-safe pointer to the partition's bloom filter.
+    /// RCU pointer to the partition's [`SimpleBloom<N>`] filter. Consulted
+    /// during reads to short-circuit storage lookups for absent keys.
     pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
-    /// The underlying storage engine instance for this partition.
+    /// Persistent key-value storage engine for this partition. Used for
+    /// spilling data beyond the in-memory budget and for recovery after restart.
     pub storage: Arc<Storage>,
-    /// Thread-safe pointer to the active worker nodes in QSBR.
+    /// Atomic pointer to the head of this partition's QSBR worker linked-list.
+    /// Each read thread that registers via [`register_worker`](Self::register_worker)
+    /// prepends a [`WorkerNode`] here so the write path can track epoch
+    /// progress across all readers.
     pub workers: Arc<AtomicPtr<WorkerNode>>,
-    /// The write-ahead log provider for this partition.
+    /// Write-ahead log provider for this partition. Receives serialised
+    /// [`WriteCommand`]s before they are applied in-memory, enabling crash
+    /// recovery via [`Partition::replay_wal`].
     pub wal: Arc<dyn WalProvider>,
 }
 
@@ -514,5 +983,110 @@ impl<const N: usize> PartitionRoute<N> {
     /// Trigger a synchronous WAL flush to durable storage
     pub fn flush_wal(&self) -> Result<(), String> {
         self.wal.checkpoint()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::sync::Arc;
+    use alloc::string::ToString;
+    use alloc::vec;
+    use crate::commands::WriteCommand;
+    use crate::queue::BoundedQueue;
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_dispatcher_register_with_budget() {
+        let mut d = CdDBDispatcher::<1024>::new_std(None);
+        let path = "test_budget".to_string();
+        let writer = d.register_partition_with_budget(path.clone(), 1024);
+        assert!(d.route_table.contains_key(&path));
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_user_writer_try_send_full_and_drop() {
+        let q = Arc::new(BoundedQueue::new(2));
+        let mut writer = UserWriter(q.clone());
+        let cmd1 = WriteCommand::Delete { entity_id: 1 };
+        assert!(writer.try_send(cmd1.clone()).is_ok());
+        
+        let cmd2 = WriteCommand::Delete { entity_id: 2 };
+        assert!(writer.try_send(cmd2.clone()).is_ok());
+        
+        let cmd3 = WriteCommand::Delete { entity_id: 3 };
+        assert!(writer.try_send(cmd3.clone()).is_err()); // queue is full
+        
+        drop(writer); // shouldn't block indefinitely
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_user_writer_send_backoff() {
+        let q = Arc::new(BoundedQueue::new(1));
+        let writer = UserWriter(q.clone());
+        
+        let cmd1 = WriteCommand::Delete { entity_id: 1 };
+        writer.try_send(cmd1).unwrap();
+        
+        let q_clone = q.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = q_clone.pop();
+        });
+        
+        let cmd2 = WriteCommand::Delete { entity_id: 2 };
+        writer.send(cmd2).unwrap(); // should block then succeed
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_route_getters_and_execute() {
+        use crate::query::QueryNode;
+        use crate::wal::NoopWal;
+        
+        let cols = Arc::new(crate::unsafe_core::new_atomic_ptr(crate::column::Columns::<1024>::new()));
+        let ptrs = Arc::new(crate::unsafe_core::new_atomic_ptr(crate::AHashMap::default()));
+        let bloom = Arc::new(crate::unsafe_core::new_atomic_ptr(crate::bloom::SimpleBloom::<1024>::new()));
+        let config = crate::Config::with_memory_budget(1, 1);
+        let (cache, _) = crate::DualCacheFF::new_headless(config);
+        
+        let path = "/tmp/test_route".to_string();
+        let _ = std::fs::remove_dir_all(&path);
+        
+        let storage = Arc::new(crate::Storage::new(
+            path.clone(),
+            Arc::new(crate::platform::StdFileSystem),
+        ));
+        
+        let workers = Arc::new(core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()));
+        
+        let route = PartitionRoute {
+            name: "test".to_string(),
+            partition_id: 0,
+            writer_tx: Arc::new(BoundedQueue::new(1)),
+            columns: cols,
+            shared_pointers: ptrs,
+            hot_index: Arc::new(cache),
+            bloom_filter: bloom,
+            storage,
+            workers,
+            wal: Arc::new(NoopWal),
+        };
+        
+        let worker = crate::qsbr::WorkerState::default();
+        let _ = route.get_column_int("foo", &worker);
+        let _ = route.get_column_str("foo", &worker);
+        let _ = route.get_column_blob("foo", &worker);
+        assert_eq!(route.len(&worker), 0);
+        
+        let nodes = vec![QueryNode::Get { entity_id: 0, attr: "nonexistent" }];
+        route.execute_batch(&nodes, |_| {});
+        
+        assert!(route.flush_wal().is_ok());
+        
+        let _ = std::fs::remove_dir_all(&path);
     }
 }

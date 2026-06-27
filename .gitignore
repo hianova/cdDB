@@ -1,6 +1,5 @@
 /target
-TODO.md
-*.rlib
 .DS_Store
 data/
-dhat-heap.json
+tool/
+TODO.md

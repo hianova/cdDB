@@ -1,304 +1,237 @@
-# cdDB Performance Report (v0.5.0)
+# Performance Guide - cdDB
 
-## Criterion Benchmark Output (v0.5.0)
+## Benchmark Results
+
 ```text
-Benchmarking Read Throughput/Single Thread Get Int
-                        time:   [91.395 ns 91.995 ns 92.635 ns]
-                        thrpt:  [10.795 Melem/s 10.870 Melem/s 10.942 Melem/s]
+running 87 tests
+test bloom::tests::test_bloom_filter ... ignored
+test column::tests::test_column_array_data_len ... ignored
+test column::tests::test_column_array_default ... ignored
+test column::tests::test_column_array_double_lock_panics - should panic ... ignored
+test column::tests::test_column_array_get_data_snapshot ... ignored
+test column::tests::test_column_array_get_element_pinned ... ignored
+test column::tests::test_column_array_get_element_with_worker ... ignored
+test column::tests::test_column_array_get_waitlist_snapshot ... ignored
+test column::tests::test_column_array_insertion ... ignored
+test column::tests::test_column_array_with_data ... ignored
+test column::tests::test_column_array_with_data_pinned ... ignored
+test column::tests::test_column_array_with_element ... ignored
+test column::tests::test_column_array_with_element_pinned ... ignored
+test column::tests::test_column_data_basics ... ignored
+test column::tests::test_column_data_default ... ignored
+test column::tests::test_column_data_iter_empty ... ignored
+test column::tests::test_column_data_iter_skips_invalid ... ignored
+test column::tests::test_column_data_set ... ignored
+test column::tests::test_column_data_set_valid ... ignored
+test column::tests::test_columns_new_and_default ... ignored
+test commands::tests::test_attributes ... ignored
+test commands::tests::test_batch_and_fast_insert ... ignored
+test commands::tests::test_decode_invalid ... ignored
+test commands::tests::test_it_ops ... ignored
+test commands::tests::test_partition_command_debug ... ignored
+test commands::tests::test_write_command_encode_decode ... ignored
+test commands::tests::test_write_command_extra_variants ... ignored
+test commands::tests::test_write_command_insert_helper ... ignored
+test dispatcher::tests::test_dispatcher_register_with_budget ... ignored
+test dispatcher::tests::test_route_getters_and_execute ... ignored
+test dispatcher::tests::test_user_writer_send_backoff ... ignored
+test dispatcher::tests::test_user_writer_try_send_full_and_drop ... ignored
+test partition::tests::test_partition_apply_commands ... ignored
+test platform::tests::test_backoff ... ignored
+test platform::tests::test_filesystem_default_impls ... ignored
+test platform::tests::test_std_executor_and_queue ... ignored
+test platform::tests::test_std_file_system ... ignored
+test platform::tests::test_std_filesystem_errors ... ignored
+test platform::tests::test_std_message_sender_backoff ... ignored
+test query::tests::test_aggregate_op_debug ... ignored
+test query::tests::test_bump_allocator ... ignored
+test query::tests::test_bump_allocator_multiple ... ignored
+test query::tests::test_cddb_query_struct ... ignored
+test query::tests::test_query_execute_batch_multiple_nodes ... ignored
+test query::tests::test_query_execute_range_none ... ignored
+test query::tests::test_query_execute_range_success ... ignored
+test query::tests::test_query_link_blob ... ignored
+test query::tests::test_query_node_debug ... ignored
+test query::tests::test_query_result_debug ... ignored
+test query::tests::test_query_seed_bloom_filter ... ignored
+test query::tests::test_query_session_entities_iter ... ignored
+test query::tests::test_query_session_execute_aggregate_avg ... ignored
+test query::tests::test_query_session_execute_aggregate_count ... ignored
+test query::tests::test_query_session_execute_aggregate_empty_avg ... ignored
+test query::tests::test_query_session_execute_aggregate_min_max ... ignored
+test query::tests::test_query_session_execute_aggregate_nonexistent ... ignored
+test query::tests::test_query_session_execute_aggregate_sum ... ignored
+test query::tests::test_query_session_execute_get_blob_via_get_node ... ignored
+test query::tests::test_query_session_execute_get_int ... ignored
+test query::tests::test_query_session_execute_get_none ... ignored
+test query::tests::test_query_session_execute_get_str_via_get_node ... ignored
+test query::tests::test_query_session_execute_link ... ignored
+test query::tests::test_query_session_execute_link_none ... ignored
+test query::tests::test_query_session_execute_scan ... ignored
+test query::tests::test_query_session_execute_scan_blob ... ignored
+test query::tests::test_query_session_execute_scan_nonexistent ... ignored
+test query::tests::test_query_session_execute_scan_str ... ignored
+test query::tests::test_query_session_get_blob ... ignored
+test query::tests::test_query_session_get_int ... ignored
+test query::tests::test_query_session_get_signed_record ... ignored
+test query::tests::test_query_session_get_str ... ignored
+test query::tests::test_query_session_with_blob ... ignored
+test query::tests::test_query_session_with_str ... ignored
+test query::tests::test_query_sum_int_range ... ignored
+test query::tests::test_unsafe_transmute_lifetime ... ignored
+test storage::tests::test_entity_data_encode_decode ... ignored
+test storage::tests::test_storage_fallback_write ... ignored
+test storage::tests::test_storage_flush_none ... ignored
+test storage::tests::test_storage_read_write ... ignored
+test storage::tests::test_storage_rebuild_and_corrupt ... ignored
+test sync::map::tests::test_ahashmap_all_apis ... ignored
+test sync::map::tests::test_ahashmap_deleted_buckets ... ignored
+test wal::tests::test_noop_wal ... ignored
+test wal::tests::test_std_wal_async ... ignored
+test wal::tests::test_std_wal_custom_relaxed ... ignored
+test wal::tests::test_std_wal_fallback ... ignored
+test wal::tests::test_std_wal_sync ... ignored
 
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Stress
-                        time:   [182.69 ns 183.56 ns 184.47 ns]
-                        thrpt:  [21.684 Melem/s 21.791 Melem/s 21.896 Melem/s]
+test result: ok. 0 passed; 0 failed; 87 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Columnar Read
-                        time:   [2.5055 ns 2.6021 ns 2.7087 ns]
-                        thrpt:  [1.4767 Gelem/s 1.5372 Gelem/s 1.5965 Gelem/s]
-
-Benchmarking Write Throughput/Batch Insert (1000 items)
-                        time:   [926.81 µs 955.22 µs 988.63 µs]
-                        thrpt:  [1.0115 Melem/s 1.0469 Melem/s 1.0790 Melem/s]
-
-Benchmarking Access Latency/Hot Path Get Int (Wait-Free RCU)
-                        time:   [35.281 ns 35.466 ns 35.763 ns]
-
-Benchmarking Access Latency/Bloom Filter Miss
-                        time:   [9.4766 ns 9.5311 ns 9.6091 ns]
-
-Benchmarking Memory Ops/ColumnArray String Allocation (1000 items)
-                        time:   [36.349 µs 37.362 µs 38.561 µs]
-```
-
-## DHAT Heap Profiling (v0.5.0)
-
-Memory allocation behaviors in the wait-free engine were profiled using DHAT.
-- **Total Allocated**: 111.9 MB in 319,640 blocks (a 41% reduction in total bytes and 44% reduction in allocations compared to v0.3.1)
-- **At t-gmax (Peak Memory)**: 93.9 MB in 212,389 blocks (a 43% reduction in peak memory compared to v0.3.1)
-- **At t-end (Live Memory)**: 87.4 MB in 109,741 blocks (a 47% reduction in live memory compared to v0.3.1)
-
-### Analysis
-The massive reduction in allocations and peak/live memory size is the direct result of codebase consolidation and optimized internal structures (including inlining stubs and eliminating micro-file heap allocations).
-
-## Summary of 0.5.0 Architecture Impact
-1. **Codebase Consolidation & Fragmentation Reduction**: Merged `std_impl.rs`, `no_std.rs`, and `loom_impl.rs` into a unified `src/sync/mod.rs` with zero duplicate structs or conditional file clutter. Inlined `dualcache_stub.rs` and `ops.rs` directly into `lib.rs` and `commands.rs`.
-2. **DualCache-FF v0.5.0 & Static Option**: Seamlessly integrated the upgraded `dualcache-ff` v0.5.0. In `#![no_std]` environments, the engine falls back to the zero-idle-thread `StaticDualCache` to avoid OS-level runtime daemon thread dependencies.
-3. **Write Path Performance Boost**: Optimized memory-buffered write structures and reduced fragmentation increased write throughput by ~52% (from 687 Kelem/s in v0.4.0 to 1.05 Melem/s in v0.5.0).
-4. **Test Coverage Resolved**: Added thorough unit tests for `wal.rs`, `platform.rs`, `commands.rs`, `storage.rs`, and `query.rs` raising codebase-wide coverage from 62.37% to 76.31%.
-
----
-
-# cdDB Performance Report (v0.4.0)
-
-## Criterion Benchmark Output (v0.4.0)
-```text
-Benchmarking Read Throughput/Single Thread Get Int
-                        time:   [92.781 ns 93.580 ns 94.588 ns]
-                        thrpt:  [10.572 Melem/s 10.686 Melem/s 10.778 Melem/s]
-
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Stress
-                        time:   [189.27 ns 194.41 ns 199.87 ns]
-                        thrpt:  [20.013 Melem/s 20.575 Melem/s 21.133 Melem/s]
-
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Columnar Read
-                        time:   [2.1372 ns 2.1452 ns 2.1530 ns]
-                        thrpt:  [1.8578 Gelem/s 1.8646 Gelem/s 1.8716 Gelem/s]
-
-Benchmarking Write Throughput/Batch Insert (1000 items)
-                        time:   [1.3927 ms 1.4545 ms 1.5286 ms]
-                        thrpt:  [654.18 Kelem/s 687.52 Kelem/s 718.01 Kelem/s]
-
-Benchmarking Access Latency/Hot Path Get Int (Wait-Free RCU)
-                        time:   [35.778 ns 36.041 ns 36.498 ns]
-
-Benchmarking Access Latency/Bloom Filter Miss
-                        time:   [9.2440 ns 9.2703 ns 9.3047 ns]
-
-Benchmarking Memory Ops/ColumnArray String Allocation (1000 items)
-                        time:   [37.683 µs 37.964 µs 38.280 µs]
-```
-
-## Summary of 0.4.0 Architecture Impact
-1. **Async Batching API**: Integration of `execute_batch_async` using `tokio::task::spawn_blocking` properly supports the zero-copy Bump Allocator query pipeline without breaking wait-free properties.
-2. **SoA Layout & Memmap2**: Our Struct-of-Arrays refactor with `memmap2` achieves 1.86 Gelem/s columnar scan throughput across 4 reader threads.
-3. **WAL Resilience & Sync Replay**: Demonstrated full robustness of the `WalMode::Sync` journal with zero data loss in our `wal_replay_test.rs`.
-4. **Const Generics & 0.4.0 Stabilizations**: `SimpleBloom` misses are processed in ~9ns. Write pressure is gracefully handled by adaptive group commits and wait-free queues. Wait-Free reader latencies remain stable at ~36ns despite background delta compaction.
-
----
-
-## Version 0.3.1 - 2026-05-29
-
-### Integration Test & Output
-```text
-warning: constant `BITS_PER_WORD` is never used
- --> src/bloom.rs:6:7
-  |
-6 | const BITS_PER_WORD: usize = core::mem::size_of::<usize>() * 8;
-  |       ^^^^^^^^^^^^^
-  |
-  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `cdDB` (lib) generated 1 warning
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
-     Running src/cold_data_benchmark.rs (target/debug/deps/cold_data_benchmark-ba49b1598a3838d6)
-
-running 1 test
-test test_cold_data_scan_performance ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.37s
-
-     Running src/read_benchmark.rs (target/debug/deps/read_benchmark-53adf0b6f44ad9dc)
-
-running 1 test
-test test_read_performance_benchmark ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
-
-     Running src/read_pressure_benchmark.rs (target/debug/deps/read_pressure_benchmark-80994915d3974616)
-
-running 1 test
-test test_read_pressure_benchmark ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.56s
-```
-
-### Criterion Benchmark Output
-```text
-warning: constant `BITS_PER_WORD` is never used
- --> src/bloom.rs:6:7
-  |
-6 | const BITS_PER_WORD: usize = core::mem::size_of::<usize>() * 8;
-  |       ^^^^^^^^^^^^^
-  |
-  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `cdDB` (lib) generated 1 warning
-   Compiling cdDB-benches v0.1.0 (/Users/hianova/Documents/cdDB/benches)
-    Finished `bench` profile [optimized] target(s) in 2.86s
-     Running src/capex.rs (target/release/deps/capex-455649d1dbdc37e8)
-Gnuplot not found, using plotters backend
-Benchmarking Efficiency Index (Throughput/Resource)/u32 Scan Efficiency
-Benchmarking Efficiency Index (Throughput/Resource)/u32 Scan Efficiency: Warming up for 3.0000 s
-Benchmarking Efficiency Index (Throughput/Resource)/u32 Scan Efficiency: Collecting 100 samples in estimated 5.0656 s (308k iterations)
-Benchmarking Efficiency Index (Throughput/Resource)/u32 Scan Efficiency: Analyzing
 Efficiency Index (Throughput/Resource)/u32 Scan Efficiency
-                        time:   [16.202 µs 16.305 µs 16.444 µs]
-                        thrpt:  [237.55 KiB/s 239.57 KiB/s 241.10 KiB/s]
+                        time:   [34.849 µs 37.779 µs 41.855 µs]
+                        thrpt:  [4.4502 GiB/s 4.9304 GiB/s 5.3449 GiB/s]
                  change:
-                        time:   [-2.7091% -1.8476% -1.1106%] (p = 0.00 < 0.05)
-                        thrpt:  [+1.1231% +1.8823% +2.7846%]
-                        Performance has improved.
-Found 13 outliers among 100 measurements (13.00%)
-  1 (1.00%) low mild
+                        time:   [+2.3720% +6.1242% +10.394%] (p = 0.00 < 0.05)
+                        thrpt:  [-9.4151% -5.7707% -2.3171%]
+                        Performance has regressed.
+Found 15 outliers among 100 measurements (15.00%)
   2 (2.00%) high mild
-  10 (10.00%) high severe
+  13 (13.00%) high severe
 
-     Running src/latancy.rs (target/release/deps/latancy-546061594b440175)
-Gnuplot not found, using plotters backend
-Benchmarking Access Latency/Hot Path Get Int (Wait-Free RCU)
-Benchmarking Access Latency/Hot Path Get Int (Wait-Free RCU): Warming up for 3.0000 s
-Benchmarking Access Latency/Hot Path Get Int (Wait-Free RCU): Collecting 100 samples in estimated 5.0001 s (172M iterations)
-Benchmarking Access Latency/Hot Path Get Int (Wait-Free RCU): Analyzing
 Access Latency/Hot Path Get Int (Wait-Free RCU)
-                        time:   [28.443 ns 28.580 ns 28.810 ns]
-                        change: [-19.505% -15.246% -11.108%] (p = 0.00 < 0.05)
-                        Performance has improved.
-Found 13 outliers among 100 measurements (13.00%)
-  1 (1.00%) low severe
-  2 (2.00%) low mild
-  7 (7.00%) high mild
-  3 (3.00%) high severe
-Benchmarking Access Latency/Bloom Filter Miss
-Benchmarking Access Latency/Bloom Filter Miss: Warming up for 3.0000 s
-Benchmarking Access Latency/Bloom Filter Miss: Collecting 100 samples in estimated 5.0000 s (682M iterations)
-Benchmarking Access Latency/Bloom Filter Miss: Analyzing
+                        time:   [71.916 ns 79.057 ns 88.278 ns]
+                        change: [+176.90% +212.75% +251.03%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
 Access Latency/Bloom Filter Miss
-                        time:   [7.1387 ns 7.2032 ns 7.3088 ns]
-                        change: [-28.397% -22.907% -17.682%] (p = 0.00 < 0.05)
+                        time:   [26.382 ns 28.788 ns 32.182 ns]
+                        change: [+230.92% +256.30% +288.86%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+
+Memory Ops/ColumnArray String Allocation (1000 items)
+                        time:   [35.282 µs 36.268 µs 37.862 µs]
+                        change: [-4.4868% -1.6097% +1.3346%] (p = 0.33 > 0.05)
+                        No change in performance detected.
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+
+cdDB vs SQLite/cdDB Async WAL TrySend (Wait-Free Enqueue)
+                        time:   [100.03 ns 110.53 ns 125.95 ns]
+                        change: [-42.916% -34.161% -23.053%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
+  6 (6.00%) high mild
+  3 (3.00%) high severe
+cdDB vs SQLite/SQLite In-Memory Write (Prepared Stmt)
+                        time:   [850.61 ns 855.98 ns 862.61 ns]
+                        change: [-6.7975% -1.1650% +5.2249%] (p = 0.73 > 0.05)
+                        No change in performance detected.
+Found 10 outliers among 100 measurements (10.00%)
+  3 (3.00%) low mild
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+cdDB vs SQLite/SQLite On-Disk Write (Prepared Stmt)
+                        time:   [281.29 µs 288.82 µs 298.76 µs]
+                        change: [-29.403% -25.806% -22.169%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+cdDB vs SQLite/cdDB Point Query (Wait-Free RCU)
+                        time:   [48.414 ns 49.704 ns 51.486 ns]
+                        change: [-82.228% -78.852% -74.649%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+cdDB vs SQLite/SQLite In-Memory Point Query
+                        time:   [315.45 ns 316.65 ns 317.96 ns]
+                        change: [-23.631% -20.697% -17.736%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+cdDB vs SQLite/SQLite On-Disk Point Query
+                        time:   [5.1347 µs 5.2480 µs 5.4011 µs]
+                        change: [-24.557% -22.210% -19.579%] (p = 0.00 < 0.05)
                         Performance has improved.
 Found 5 outliers among 100 measurements (5.00%)
-  1 (1.00%) low severe
   1 (1.00%) low mild
-  1 (1.00%) high mild
+  2 (2.00%) high mild
   2 (2.00%) high severe
-
-     Running src/memory.rs (target/release/deps/memory-ca372e2fb2aff39b)
-Gnuplot not found, using plotters backend
-Benchmarking Memory Ops/ColumnArray String Allocation (1000 items)
-Benchmarking Memory Ops/ColumnArray String Allocation (1000 items): Warming up for 3.0000 s
-Benchmarking Memory Ops/ColumnArray String Allocation (1000 items): Collecting 100 samples in estimated 5.1835 s (131k iterations)
-Benchmarking Memory Ops/ColumnArray String Allocation (1000 items): Analyzing
-Memory Ops/ColumnArray String Allocation (1000 items)
-                        time:   [39.372 µs 39.449 µs 39.611 µs]
-                        change: [-7.8987% -6.2347% -4.7153%] (p = 0.00 < 0.05)
+cdDB vs SQLite/cdDB Columnar Scan Sum Range (100 elements)
+                        time:   [3.8614 µs 4.0692 µs 4.3240 µs]
+                        change: [-1.3166% +4.3673% +10.395%] (p = 0.14 > 0.05)
+                        No change in performance detected.
+Found 28 outliers among 100 measurements (28.00%)
+  22 (22.00%) low severe
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+cdDB vs SQLite/SQLite In-Memory Scan Sum Range (100 elements)
+                        time:   [3.2267 µs 3.2400 µs 3.2537 µs]
+                        change: [-57.901% -53.163% -47.469%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+cdDB vs SQLite/SQLite On-Disk Scan Sum Range (100 elements)
+                        time:   [7.9394 µs 8.0486 µs 8.2518 µs]
+                        change: [-8.2905% -7.5295% -6.4309%] (p = 0.00 < 0.05)
                         Performance has improved.
 Found 8 outliers among 100 measurements (8.00%)
-  1 (1.00%) low severe
-  2 (2.00%) low mild
-  1 (1.00%) high mild
-  4 (4.00%) high severe
-
-     Running src/throughput.rs (target/release/deps/throughput-5aa6fc110635546e)
-Gnuplot not found, using plotters backend
-Benchmarking Read Throughput/Single Thread Get Int
-Benchmarking Read Throughput/Single Thread Get Int: Warming up for 3.0000 s
-Benchmarking Read Throughput/Single Thread Get Int: Collecting 100 samples in estimated 5.0008 s (26M iterations)
-Benchmarking Read Throughput/Single Thread Get Int: Analyzing
-Read Throughput/Single Thread Get Int
-                        time:   [85.444 ns 85.722 ns 85.995 ns]
-                        thrpt:  [11.629 Melem/s 11.666 Melem/s 11.704 Melem/s]
-                 change:
-                        time:   [-13.989% -11.641% -9.2321%] (p = 0.00 < 0.05)
-                        thrpt:  [+10.171% +13.175% +16.265%]
-                        Performance has improved.
-Found 14 outliers among 100 measurements (14.00%)
-  6 (6.00%) low severe
   3 (3.00%) low mild
   4 (4.00%) high mild
   1 (1.00%) high severe
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Stress
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Stress: Warming up for 3.0000 s
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Stress: Collecting 100 samples in estimated 5.0004 s (26M iterations)
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Stress: Analyzing
-Read Throughput/Multi-Thread (4 Readers) Stress
-                        time:   [188.69 ns 189.32 ns 190.34 ns]
-                        thrpt:  [21.015 Melem/s 21.129 Melem/s 21.199 Melem/s]
+
+Read Throughput/Single Thread Get Int
+                        time:   [134.91 ns 136.40 ns 138.68 ns]
+                        thrpt:  [7.2108 Melem/s 7.3316 Melem/s 7.4122 Melem/s]
                  change:
-                        time:   [-5.8590% -4.8137% -3.6595%] (p = 0.00 < 0.05)
-                        thrpt:  [+3.7985% +5.0571% +6.2237%]
-                        Performance has improved.
-Found 11 outliers among 100 measurements (11.00%)
-  1 (1.00%) low severe
-  5 (5.00%) low mild
-  2 (2.00%) high mild
-  3 (3.00%) high severe
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Columnar Read
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Columnar Read: Warming up for 3.0000 s
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Columnar Read: Collecting 100 samples in estimated 5.0000 s (2.5B iterations)
-Benchmarking Read Throughput/Multi-Thread (4 Readers) Columnar Read: Analyzing
-Read Throughput/Multi-Thread (4 Readers) Columnar Read
-                        time:   [2.1112 ns 2.1352 ns 2.1610 ns]
-                        thrpt:  [1.8510 Gelem/s 1.8734 Gelem/s 1.8946 Gelem/s]
-                 change:
-                        time:   [+6.6728% +8.1615% +9.8584%] (p = 0.00 < 0.05)
-                        thrpt:  [-8.9737% -7.5457% -6.2554%]
+                        time:   [+45.234% +52.199% +64.214%] (p = 0.00 < 0.05)
+                        thrpt:  [-39.104% -34.297% -31.146%]
                         Performance has regressed.
-Found 10 outliers among 100 measurements (10.00%)
-  6 (6.00%) high mild
+Found 13 outliers among 100 measurements (13.00%)
+  5 (5.00%) low severe
+  1 (1.00%) low mild
+  3 (3.00%) high mild
   4 (4.00%) high severe
+Read Throughput/Multi-Thread (4 Readers) Stress
+                        time:   [254.68 ns 257.43 ns 260.31 ns]
+                        thrpt:  [15.366 Melem/s 15.538 Melem/s 15.706 Melem/s]
+                 change:
+                        time:   [+37.979% +40.112% +42.222%] (p = 0.00 < 0.05)
+                        thrpt:  [-29.688% -28.629% -27.525%]
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Read Throughput/Multi-Thread (4 Readers) Columnar Read
+                        time:   [2.1869 ns 2.2005 ns 2.2149 ns]
+                        thrpt:  [1.8060 Gelem/s 1.8178 Gelem/s 1.8291 Gelem/s]
+                 change:
+                        time:   [-13.896% -11.127% -8.5473%] (p = 0.00 < 0.05)
+                        thrpt:  [+9.3462% +12.520% +16.139%]
+                        Performance has improved.
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+
+Write Throughput/Batch Insert (1000 items)
+                        time:   [1.3507 ms 1.3910 ms 1.4315 ms]
+                        thrpt:  [698.58 Kelem/s 718.91 Kelem/s 740.38 Kelem/s]
+                 change:
+                        time:   [+39.382% +45.621% +52.172%] (p = 0.00 < 0.05)
+                        thrpt:  [-34.285% -31.329% -28.255%]
+                        Performance has regressed.
 ```
-
-# cdDB Performance Report (v0.3.1)
-
-## DHAT Heap Profiling (v0.3.1)
-
-Memory allocation behaviors in the wait-free engine with dynamic Adaptive Group Commit in WAL were profiled using DHAT.
-
-**Test Setup:**
-- 10,000 entities batch inserted into a single partition.
-- `SimpleBloom<1024>` constant generic configuration.
-- `AHashMap` routing table updates.
-- Bounded sync channel capacity increased to `262,144` to support high-throughput bursts.
-
-### Allocation Metrics
-
-- **Total Allocated**: 191.4 MB in 571,970 blocks
-- **At t-gmax (Peak Memory)**: 166.1 MB in 521,274 blocks
-- **At t-end (Live Memory)**: 166.0 MB in 521,290 blocks
-
-### Analysis
-
-Following the recent query payload API optimizations, memory allocation count and overall footprint decreased by ~14 MB. Bounded synchronization channels pre-allocate safe slots to fully accommodate bursts of batch inserts. Under high pressure, the **Adaptive Group Commit** mechanism dynamically aggregates and flushes WAL commits, keeping memory churn in check.
-
-## Access Latency (v0.3.1)
-
-Tested with Criterion:
-- **Hot Path Get Int (Wait-Free RCU)**: ~28.19 ns
-- **Bloom Filter Miss**: ~6.75 ns (Blazing fast immediate rejection, showing a **99.99%** latency reduction compared to saturated bloom filters, and improved from ~17ns in v0.2.4 by utilizing const generics instead of dynamic sizing).
-
----
-
-# cdDB Performance Report (v0.3.0)
-
-## DHAT Heap Profiling
-
-Following the decoupling of the executor and transition towards const-generics based heap-free data structures, memory allocation behaviors in the wait-free engine were profiled using DHAT.
-
-**Test Setup:**
-- 10,000 entities batch inserted into a single partition.
-- `SimpleBloom<1024>` constant generic configuration.
-- `AHashMap` routing table updates.
-
-### Allocation Metrics
-
-- **Total Allocated**: 169.4 MB in 652,897 blocks
-- **At t-gmax (Peak Memory)**: 141.7 MB in 601,863 blocks
-- **At t-end (Live Memory)**: 121.4 MB in 325,394 blocks
-
-### Analysis
-
-The significant difference between Total Allocated and t-end indicates the Wait-Free RCU pointer swapping mechanism is actively churning through cloned `Vec` blocks during batch writes. Although our new optimizations use `const N` backing arrays for `SimpleBloom`, the core `ColumnArray` instances still duplicate `Vec`s to achieve stable snapshots for concurrent readers. 
-
-In extremely constrained `#![no_std]` targets, the future roadmap includes converting `ColumnArray` to a static, double-buffered `[Option<T>; N]` structure to further reduce heap usage to near zero.
-
-## Flamegraph / CPU Profiling
-
-*(Flamegraph profile prepared in `benches/profiling.rs`. Execute `cargo flamegraph --bench profiling` to visualize the CPU trace of the hot paths when installed.)*

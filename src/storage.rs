@@ -5,15 +5,45 @@ use crate::platform::FileSystem;
 use crate::AHashMap;
 use alloc::sync::Arc;
 
+/// Represents the complete persisted state of a single entity.
+///
+/// An `EntityData` bundles the entity's unique identifier together with its
+/// three typed attribute maps — string-valued, integer-valued, and raw-byte-valued.
+/// It is the canonical unit of serialisation: one `EntityData` corresponds to
+/// exactly one length-prefixed record in `entities.bin`.
 #[derive(Clone, Debug)]
 pub struct EntityData {
+    /// The unique numeric identifier for this entity within its partition.
     pub entity_id: usize,
+    /// String-valued attributes keyed by attribute name.
     pub attributes: crate::Attributes<String>,
+    /// Integer-valued attributes (`u32`) keyed by attribute name.
     pub attributes_int: crate::Attributes<u32>,
+    /// Raw byte-blob attributes keyed by attribute name.
     pub attributes_blob: crate::Attributes<Vec<u8>>,
 }
 
 impl EntityData {
+    /// Serialises the entity into a compact little-endian binary representation.
+    ///
+    /// The layout written into the returned buffer is:
+    /// 1. **Entity ID** — 8 bytes, little-endian `u64`.
+    /// 2. **String attributes** — encoded by [`crate::Attributes::encode_to`]; each
+    ///    value is prefixed by a 4-byte LE length followed by its UTF-8 bytes.
+    /// 3. **Integer attributes** — each `u32` value is 4 bytes LE.
+    /// 4. **Blob attributes** — each value is prefixed by a 4-byte LE length
+    ///    followed by its raw bytes.
+    ///
+    /// The returned `Vec<u8>` is later wrapped in a 4-byte length prefix by
+    /// [`Storage::write_entity`] before being appended to `entities.bin`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// let data = EntityData { entity_id: 1, .. };
+    /// let bytes = data.encode();
+    /// assert!(bytes.len() >= 8); // at minimum the entity-ID field
+    /// ```
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(self.entity_id as u64).to_le_bytes());
@@ -31,6 +61,18 @@ impl EntityData {
         buf
     }
 
+    /// Deserialises an `EntityData` from a raw binary buffer previously produced
+    /// by [`EntityData::encode`].
+    ///
+    /// The buffer must begin with an 8-byte little-endian entity ID followed by
+    /// the three attribute-map sections in the same order as `encode` writes them.
+    /// If the buffer is too short, contains invalid UTF-8 in a string attribute, or
+    /// is otherwise malformed, `None` is returned rather than panicking.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(EntityData)` on success.
+    /// - `None` if the input is truncated or otherwise cannot be decoded.
     pub fn decode(buf: &[u8]) -> Option<Self> {
         let mut pos = 0;
         let entity_id = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
@@ -63,18 +105,65 @@ impl EntityData {
     }
 }
 
+/// Manages the append-only sequential log (`entities.bin`) for a single partition.
+///
+/// `Storage` owns all I/O concerns for one partition directory:
+/// - It opens (or creates) `<base_path>/entities.bin` on construction and wraps
+///   the write handle in a 64 KiB [`std::io::BufWriter`] to amortise syscall
+///   overhead.
+/// - It maintains an in-memory **disk index** (`entity_id → (offset, length)`) so
+///   that any entity can be located in O(1) time without scanning the log.
+/// - On `std` targets, reads are served through a memory-mapped view of the file
+///   ([`memmap2::Mmap`]) and the view is lazily (re-)created whenever it is stale.
+/// - [`Storage::compact`] rewrites the file, keeping only the most-recent record
+///   per entity and atomically swapping in the compacted file.
+///
+/// All mutable state is guarded by `crate::sync::Mutex` so that a `Storage`
+/// instance can be shared across threads.
 pub struct Storage {
+    /// Filesystem path to the partition directory that contains `entities.bin`.
     pub base_path: String,
+    /// Filesystem abstraction used for all I/O; supports both the standard
+    /// library and `no_std` environments through the [`FileSystem`] trait.
     pub fs: Arc<dyn FileSystem>,
+    /// Maps each entity ID to its `(byte_offset, payload_length)` within
+    /// `entities.bin`, where `byte_offset` points at the 4-byte length prefix
+    /// and `payload_length` is the size of the payload that follows it.
+    /// Enables O(1) random access without directory scanning.
     pub disk_index: crate::sync::Mutex<AHashMap<usize, (u64, u32)>>,
+    /// The byte offset at which the *next* record will be appended.
+    /// Updated atomically alongside `disk_index` on every successful write.
     pub current_offset: crate::sync::Mutex<u64>,
+    /// Buffered file writer for `entities.bin` (64 KiB capacity).
+    /// `None` if the file could not be opened or after a `compact()` swap.
+    /// Only present on `std` targets.
     #[cfg(feature = "std")]
     pub writer: crate::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+    /// Memory-mapped read view of `entities.bin`.
+    /// Lazily created on the first read and invalidated (set to `None`) after
+    /// `compact()` replaces the underlying file.
+    /// Only present on `std` targets.
     #[cfg(feature = "std")]
     pub mmap: crate::sync::Mutex<Option<alloc::sync::Arc<memmap2::Mmap>>>,
 }
 
 impl Storage {
+    /// Creates a new `Storage` instance for the given partition directory.
+    ///
+    /// This function:
+    /// 1. Ensures `base_path` exists (creates it with all parents if necessary).
+    /// 2. Opens `<base_path>/entities.bin` in append mode (creating it if absent),
+    ///    wrapping the handle in a 64 KiB [`std::io::BufWriter`].
+    /// 3. Calls [`Storage::rebuild_disk_index`] to scan any pre-existing data and
+    ///    populate the in-memory disk index and `current_offset`.
+    ///
+    /// On `no_std` targets the buffered writer and mmap fields are omitted; all
+    /// I/O is delegated to `fs` directly.
+    ///
+    /// # Arguments
+    ///
+    /// * `base_path` — Path to the partition directory (created if missing).
+    /// * `fs` — Shared filesystem implementation.
     pub fn new(base_path: String, fs: Arc<dyn FileSystem>) -> Self {
         #[cfg(feature = "std")]
         let writer = {
@@ -151,6 +240,18 @@ impl Storage {
         }
     }
 
+    /// Flushes the in-process write buffer and durably syncs the file to storage.
+    ///
+    /// On `std` targets this calls [`std::io::Write::flush`] on the inner
+    /// `BufWriter` (draining any buffered bytes to the kernel) and then
+    /// [`std::fs::File::sync_all`] to ensure the data has reached the underlying
+    /// storage device.
+    ///
+    /// This is a no-op on `no_std` targets because writes are unbuffered there.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(String)` if either the flush or the `fsync` call fails.
     pub fn flush(&self) -> Result<(), String> {
         #[cfg(feature = "std")]
         {
@@ -158,13 +259,31 @@ impl Storage {
             if let Some(w) = lock.as_mut() {
                 use std::io::Write;
                 w.flush().map_err(|e| e.to_string())?;
-                w.get_ref().sync_all().map_err(|e| e.to_string())?;
+                w.get_ref().sync_data().map_err(|e| e.to_string())?;
             }
         }
         Ok(())
     }
 
-    /// 將實體寫入持久層
+    /// Appends an entity to `entities.bin` as a length-prefixed record and
+    /// updates the in-memory disk index.
+    ///
+    /// The on-disk format for each record is:
+    /// ```text
+    /// [ 4 bytes LE payload length ][ payload bytes (EntityData::encode output) ]
+    /// ```
+    ///
+    /// On `std` targets the record is written through the shared `BufWriter`.
+    /// If the writer is unavailable, the call falls back to
+    /// [`FileSystem::append`]. On `no_std` targets [`FileSystem::append`] is
+    /// always used.
+    ///
+    /// After a successful write `disk_index` is updated so that subsequent
+    /// [`Storage::read_entity`] calls can find the new record immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(String)` if the underlying write or append operation fails.
     pub fn write_entity(&self, data: &EntityData) -> Result<(), String> {
         let path = format!("{}/entities.bin", self.base_path);
         let bytes = data.encode();
@@ -215,7 +334,24 @@ impl Storage {
         }
     }
 
-    /// 讀取實體
+    /// Reads and decodes a single entity from `entities.bin` using the disk index.
+    ///
+    /// The method looks up `entity_id` in `disk_index` to obtain the record's
+    /// byte offset and length, then reads exactly those bytes.
+    ///
+    /// On `std` targets the read is served through a memory-mapped view
+    /// ([`memmap2::Mmap`]) that is lazily created (or re-created if stale) so
+    /// that the kernel can satisfy sequential reads from the page cache with
+    /// minimal copying. On `no_std` targets [`FileSystem::read_range`] is used.
+    ///
+    /// # Errors
+    ///
+    /// - `"Not found in disk index"` — `entity_id` has never been written.
+    /// - `"Truncated"` / `"Truncated record"` — the on-disk record is shorter
+    ///   than the length prefix indicates (file corruption).
+    /// - `"Decode failed"` / `"Failed to decode"` — [`EntityData::decode`]
+    ///   returned `None` (malformed payload).
+    /// - Any I/O error from the underlying filesystem.
     pub fn read_entity(&self, entity_id: usize) -> Result<EntityData, String> {
         let (offset, len) = {
             #[cfg(feature = "std")]
@@ -285,7 +421,28 @@ impl Storage {
         }
     }
 
-    /// 塊狀讀取
+    /// Prefetch-reads up to `block_size * 2` adjacent entities starting from the
+    /// block-aligned predecessor of `entity_id`.
+    ///
+    /// Entity IDs are grouped into blocks of `block_size`. This method determines
+    /// the start of the block that contains `entity_id` and then attempts to read
+    /// `2 × block_size` consecutive IDs beginning at that block boundary. This
+    /// over-fetching strategy is intended for promoting cold data into an
+    /// upper-tier cache without requiring callers to know exact block boundaries.
+    ///
+    /// Entities that are not present in the disk index are silently skipped;
+    /// only successfully decoded records are included in the returned vector.
+    ///
+    /// # Arguments
+    ///
+    /// * `entity_id` — The entity whose block should be fetched.
+    /// * `block_size` — Number of entity IDs per block; also controls how many
+    ///   total IDs are probed (`2 × block_size`).
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<EntityData>` containing every entity that was found and decoded
+    /// within the probed ID range (may be empty if none are stored).
     pub fn read_block(&self, entity_id: usize, block_size: usize) -> Vec<EntityData> {
         let start_id = (entity_id / block_size) * block_size;
         let mut block_data = Vec::new();
@@ -300,7 +457,32 @@ impl Storage {
         block_data
     }
 
-    /// Background Compaction
+    /// Rewrites `entities.bin`, retaining only the latest record for each entity.
+    ///
+    /// Over time, repeated [`Storage::write_entity`] calls for the same entity ID
+    /// leave stale, superseded records in the append-only log. `compact` eliminates
+    /// these duplicates in two lock-free phases to minimise write stalls:
+    ///
+    /// **Phase 1 (unlocked):** Snapshot the current disk index and `current_offset`,
+    /// then iterate over the snapshot, copying each entity's latest record into a
+    /// temporary file (`entities.bin.tmp`) using a fresh 64 KiB `BufWriter`.
+    ///
+    /// **Phase 2 (locked):** Acquire all three locks (`disk_index`, `current_offset`,
+    /// `writer`). Collect any *delta* records written since the Phase 1 snapshot
+    /// (those whose offset ≥ `original_offset`), append them to the temp file in
+    /// offset order, then atomically rename the temp file over `entities.bin`.
+    /// The `writer` and `mmap` handles are refreshed to point at the new file.
+    ///
+    /// After `compact` returns, `disk_index` and `current_offset` reflect the
+    /// compacted file and the mmap cache is cleared so the next read will
+    /// re-map the new file.
+    ///
+    /// This method is a no-op on `no_std` targets (returns `Ok(())` immediately).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(String)` if the temporary file cannot be created, any read or
+    /// write fails, or the final rename fails.
     pub fn compact(&self) -> Result<(), String> {
         #[cfg(feature = "std")]
         {
@@ -361,7 +543,7 @@ impl Storage {
 
             use std::io::Write;
             tmp_writer.flush().map_err(|e| e.to_string())?;
-            tmp_writer.get_ref().sync_all().map_err(|e| e.to_string())?;
+            tmp_writer.get_ref().sync_data().map_err(|e| e.to_string())?;
 
             *writer_lock = None;
             let _ = std::fs::rename(&tmp_path, &path);
@@ -387,23 +569,30 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn test_entity_data_encode_decode() {
         let mut attrs = crate::Attributes::new();
         attrs.insert("name".to_string(), "foo".to_string());
+        let mut attrs_int = crate::Attributes::new();
+        attrs_int.insert("age".to_string(), 42);
+        let mut attrs_blob = crate::Attributes::new();
+        attrs_blob.insert("data".to_string(), vec![1, 2, 3]);
         
         let data = EntityData {
             entity_id: 42,
             attributes: attrs,
-            attributes_int: crate::Attributes::new(),
-            attributes_blob: crate::Attributes::new(),
+            attributes_int: attrs_int,
+            attributes_blob: attrs_blob,
         };
         
         let buf = data.encode();
         let dec = EntityData::decode(&buf).unwrap();
         assert_eq!(dec.entity_id, 42);
         assert_eq!(dec.attributes.get("name").unwrap(), "foo");
+        assert_eq!(dec.attributes_int.get("age").unwrap(), &42);
+        assert_eq!(dec.attributes_blob.get("data").unwrap(), &vec![1, 2, 3]);
     }
 
     #[cfg(feature = "std")]
@@ -423,14 +612,72 @@ mod tests {
         let read_data = storage.read_entity(10).unwrap();
         assert_eq!(read_data.entity_id, 10);
         
+        // Test missing entity
+        assert!(storage.read_entity(999).is_err());
+        
         let block = storage.read_block(10, 5);
         assert!(!block.is_empty());
         assert_eq!(block[0].entity_id, 10);
+        
+        let empty_block = storage.read_block(999, 5);
+        assert!(empty_block.is_empty());
         
         storage.compact().unwrap();
         let read_data2 = storage.read_entity(10).unwrap();
         assert_eq!(read_data2.entity_id, 10);
         
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_storage_fallback_write() {
+        let fs = Arc::new(crate::platform::StdFileSystem);
+        let path = "test_storage_fallback";
+        let _ = std::fs::remove_dir_all(path);
+        let storage = Storage::new(path.to_string(), fs);
+        
+        // Force writer to None
+        *storage.writer.lock().unwrap() = None;
+        *storage.mmap.lock().unwrap() = None;
+        
+        let data = EntityData {
+            entity_id: 20,
+            attributes: crate::Attributes::new(),
+            attributes_int: crate::Attributes::new(),
+            attributes_blob: crate::Attributes::new(),
+        };
+        storage.write_entity(&data).unwrap();
+        let read_data = storage.read_entity(20).unwrap();
+        assert_eq!(read_data.entity_id, 20);
+        
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_storage_rebuild_and_corrupt() {
+        let fs = Arc::new(crate::platform::StdFileSystem);
+        let path = "test_storage_corrupt";
+        let _ = std::fs::remove_dir_all(path);
+        std::fs::create_dir_all(path).unwrap();
+        let bin_path = format!("{}/entities.bin", path);
+        // Write invalid data (length prefix without enough payload)
+        std::fs::write(&bin_path, vec![0xFF, 0x00, 0x00, 0x00, 1, 2, 3]).unwrap();
+        let storage = Storage::new(path.to_string(), fs.clone()); // calls rebuild disk index
+        assert!(storage.read_entity(1).is_err());
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_storage_flush_none() {
+        let fs = Arc::new(crate::platform::StdFileSystem);
+        let path = "test_storage_flush_none";
+        let _ = std::fs::remove_dir_all(path);
+        let storage = Storage::new(path.to_string(), fs);
+        *storage.writer.lock().unwrap() = None;
+        assert!(storage.flush().is_ok());
         let _ = std::fs::remove_dir_all(path);
     }
 }

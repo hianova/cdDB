@@ -119,3 +119,5 @@ To support power-saving states and allow upper-layer application servers or conn
 *   **Multi-Threaded Read Throughput**: **~20.05 Million QPS** (4 Reader Threads, end-to-end RCU lookup)
 *   **Multi-Threaded Columnar DOD Read**: **~1.69 Billion QPS** (4 Reader Threads, wait-free sequential ColumnArray read)
 *   **Cold Data Promotion Speedup**: **~330x** acceleration after promotion to columnar memory cache.
+*   **Wait-Free Async WAL Enqueue (TrySend)**: **~212ns** latency (eliminating I/O blocker from the hot path)
+*   **Wait-Free Columnar Scan Range (100 Elements)**: **~3.93µs** total (~39.3ns per element lookup)

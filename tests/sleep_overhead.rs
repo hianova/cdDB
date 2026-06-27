@@ -12,7 +12,7 @@ fn test_sleep_overhead() {
         let handle = std::thread::spawn(move || {
             daemon.run();
         });
-        let _ = global_cache.cmd_tx.try_send(dualcache_ff::daemon::Command::Shutdown);
+        global_cache.shutdown_gracefully(None);
         let _ = handle.join();
     }
     let elapsed = start.elapsed();
@@ -31,6 +31,6 @@ fn test_sleep_overhead() {
     let elapsed = start.elapsed();
     println!("Sending 10_000 commands overhead: {:?}", elapsed);
 
-    let _ = global_cache.cmd_tx.try_send(dualcache_ff::daemon::Command::Shutdown);
+    global_cache.shutdown_gracefully(None);
     let _ = handle.join();
 }

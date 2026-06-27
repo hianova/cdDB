@@ -17,15 +17,28 @@ use crate::storage::{Storage, EntityData};
 use crate::unsafe_core::{load_clone, swap_ptr};
 use crate::wal::WalProvider;
 
-/// 2. 多向量指針快照 (RCU Snapshot)
+/// An RCU snapshot pointer for a single entity, containing the entity ID and a map of
+/// attribute names to their column array indices.
+///
+/// A new `MultiVectorPointer` is published atomically (via [`swap_ptr`]) every time an
+/// entity is inserted, updated, or deleted, so readers always see a consistent snapshot
+/// without holding any locks.
 #[derive(Clone, Debug, Default)]
 pub struct MultiVectorPointer {
+    /// The unique numeric identifier of the entity this snapshot belongs to.
     pub entity_id: usize,
+    /// Maps each attribute name to the index of its value inside the corresponding
+    /// [`ColumnArray`](crate::column::ColumnArray).
     pub attribute_indices: AHashMap<String, usize>,
 }
 
-/// 3. 分區/群組 (Partition / Group)
-/// Represents a single database partition processing thread and state.
+/// Represents a single database partition — its in-memory columnar store, persistent
+/// storage, write-ahead log, and the command channel that drives it.
+///
+/// Each partition runs on its own native OS thread. The [`run()`](Partition::run) method
+/// is the thread's main loop: it drains incoming [`PartitionCommand`]s, executes batched
+/// writes (Group Commit), and performs QSBR maintenance to safely reclaim old RCU
+/// snapshots.
 pub struct Partition<const N: usize> {
     /// Backing columns array.
     pub columns: Arc<AtomicPtr<Columns<N>>>,
@@ -59,6 +72,19 @@ pub struct Partition<const N: usize> {
 
 impl<const N: usize> Partition<N> {
     /// Creates a new `Partition` worker instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `writer_rx` — The command channel this partition will drain in its event loop.
+    /// * `columns`   — Shared atomic pointer to the columnar data store.
+    /// * `wal`       — Write-Ahead Log provider used to persist commands before applying them.
+    /// * `workers`   — QSBR worker list shared across all partition threads.
+    /// * `storage_path` — File-system path for the on-disk storage of this partition.
+    /// * `fs`        — File-system abstraction (allows injection of in-memory FS for tests).
+    /// * `shared_pointers` — Atomic pointer to the global entity-pointer map (RCU-managed).
+    /// * `bloom_filter`    — Atomic pointer to the Bloom filter for fast existence checks.
+    /// * `hot_index`       — Dual-cache heat tracker shared with the query path.
+    /// * `partition_id`    — Numeric identifier of this partition within the database.
     pub fn new(
         writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
         columns: Arc<AtomicPtr<Columns<N>>>,
@@ -90,6 +116,8 @@ impl<const N: usize> Partition<N> {
         }
     }
 
+    /// Inserts `entity_id` into the Bloom filter and triggers a rebuild when the filter
+    /// exceeds 70 % occupancy.
     fn update_bloom(&mut self, entity_id: usize) {
         {
             let bloom = crate::unsafe_core::load_ref(&self.bloom_filter);
@@ -102,6 +130,8 @@ impl<const N: usize> Partition<N> {
         }
     }
 
+    /// Doubles the Bloom filter's bit-count and repopulates it from the current disk index,
+    /// then atomically swaps in the new filter via RCU.
     fn rebuild_bloom_filter(&mut self) {
         let _old_bits = self.bloom_bits;
         self.bloom_bits *= 2;
@@ -126,7 +156,23 @@ impl<const N: usize> Partition<N> {
         self.bloom_count = count;
     }
 
-    /// Runs the partition's event loop, processing write commands from the channel.
+    /// Runs the partition's main event loop on the calling thread (intended to be the
+    /// partition's dedicated OS thread).
+    ///
+    /// The loop:
+    /// 1. Blocks on the command channel, waiting for the next [`PartitionCommand`].
+    /// 2. Drains up to 1 000 additional pending commands without blocking (Group Commit
+    ///    batching — amortises WAL and flush overhead across many writes).
+    /// 3. Appends all [`WriteCommand`]s in the batch to the WAL before applying them.
+    /// 4. Applies the entire batch via [`apply_batch_commands`](Self::apply_batch_commands).
+    /// 5. Flushes the storage layer.
+    /// 6. Runs one round of QSBR maintenance to reclaim deferred RCU garbage.
+    ///
+    /// The loop exits when a [`PartitionCommand::Shutdown`] is received or the channel
+    /// is closed.
+    ///
+    /// Under `std`, a background compaction thread is also spawned that triggers
+    /// storage compaction every 300 seconds.
     pub fn run(mut self) {
         #[cfg(feature = "std")]
         {
@@ -180,6 +226,8 @@ impl<const N: usize> Partition<N> {
         }
     }
 
+    /// Applies a batch of [`PartitionCommand`]s to the in-memory columnar store and
+    /// atomically publishes the updated [`MultiVectorPointer`] map via RCU swap.
     fn apply_batch_commands(&mut self, commands: Vec<PartitionCommand>) {
         let mut next_pointers = load_clone(&self.shared_pointers);
 
@@ -240,6 +288,8 @@ impl<const N: usize> Partition<N> {
         self.qsbr.defer_free(old);
     }
 
+    /// Inserts or updates a single entity's attributes into the columnar store, updates
+    /// the Bloom filter and hot-index, and persists the entity to storage.
     fn process_insert(
         &mut self,
         next_pointers: &mut AHashMap<usize, MultiVectorPointer>,
@@ -291,6 +341,8 @@ impl<const N: usize> Partition<N> {
         let _ = self.storage.write_entity(&entity_data);
     }
 
+    /// Promotes a cold entity loaded from disk into the in-memory columnar store,
+    /// returning its new [`MultiVectorPointer`].
     fn process_promote(&mut self, next: &mut AHashMap<usize, MultiVectorPointer>, data: EntityData) -> MultiVectorPointer {
         let mut new_indices = AHashMap::default();
         self.update_bloom(data.entity_id);
@@ -321,16 +373,29 @@ impl<const N: usize> Partition<N> {
         ptr
     }
 
+    /// Convenience wrapper — applies a single [`PartitionCommand`] as a one-element batch.
     fn apply_command(&mut self, cmd: PartitionCommand) {
         self.apply_batch_commands(vec![cmd]);
     }
 
+    /// Appends a single [`WriteCommand`] to the WAL (kept for direct-call use-cases;
+    /// the hot path uses [`WalProvider::append_batch`] instead).
     #[allow(dead_code)]
     fn log_wal(&mut self, cmd: &WriteCommand) {
         let _ = self.wal.append(cmd);
     }
 
-    /// Replays the write-ahead log to reconstruct partition state during startup.
+    /// Replays all WAL entries on startup to restore the in-memory columnar state after
+    /// a crash or restart.
+    ///
+    /// Reads the entire WAL byte stream, decodes each length-prefixed [`WriteCommand`]
+    /// record in order, and re-applies them through [`apply_command`](Self::apply_command).
+    /// Truncated or corrupt trailing records are silently skipped.
+    ///
+    /// # Errors
+    ///
+    /// If [`WalProvider::read_all`] returns an error the method returns early without
+    /// applying any commands.
     pub fn replay_wal(&mut self) {
         if let Ok(bytes) = self.wal.read_all() {
             let mut pos = 0;
@@ -349,6 +414,8 @@ impl<const N: usize> Partition<N> {
         }
     }
 
+    /// Returns the existing string [`ColumnArray`](crate::column::ColumnArray) for `name`,
+    /// or creates and atomically publishes a new one via RCU swap.
     fn get_or_create_column_str(&mut self, name: &str) -> Arc<crate::column::ColumnArray<String, N>> {
         let cols = crate::unsafe_core::load_ref(&self.columns);
         if let Some(col) = cols.str_cols.get(name) {
@@ -363,6 +430,8 @@ impl<const N: usize> Partition<N> {
         }
     }
 
+    /// Returns the existing integer [`ColumnArray`](crate::column::ColumnArray) for `name`,
+    /// or creates and atomically publishes a new one via RCU swap.
     fn get_or_create_column_int(&mut self, name: &str) -> Arc<crate::column::ColumnArray<u32, N>> {
         let cols = crate::unsafe_core::load_ref(&self.columns);
         if let Some(col) = cols.int_cols.get(name) {
@@ -377,6 +446,8 @@ impl<const N: usize> Partition<N> {
         }
     }
 
+    /// Returns the existing blob [`ColumnArray`](crate::column::ColumnArray) for `name`,
+    /// or creates and atomically publishes a new one via RCU swap.
     fn get_or_create_column_blob(&mut self, name: &str) -> Arc<crate::column::ColumnArray<Vec<u8>, N>> {
         let cols = crate::unsafe_core::load_ref(&self.columns);
         if let Some(col) = cols.blob_cols.get(name) {
@@ -391,6 +462,9 @@ impl<const N: usize> Partition<N> {
         }
     }
 
+    /// Appends `val` to `col`, reusing a slot from the waitlist (free-list) when one is
+    /// available. Atomically publishes both the updated waitlist and data array via RCU
+    /// swap and returns the index at which `val` was stored.
     fn insert_into_column<T: Default + Clone>(&mut self, col: &crate::column::ColumnArray<T, N>, val: T) -> usize {
         let mut wl = load_clone(&col.waitlist);
         let mut data = load_clone(&col.data);
@@ -411,3 +485,86 @@ impl<const N: usize> Partition<N> {
         idx
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wal::NoopWal;
+    use crate::unsafe_core::new_atomic_ptr;
+    use crate::partition::WorkerNode;
+    use crate::bloom::SimpleBloom;
+    
+    #[test]
+    fn test_partition_apply_commands() {
+        let columns = Arc::new(new_atomic_ptr(crate::column::Columns::<512>::new()));
+        let wal = Arc::new(NoopWal);
+        let workers = Arc::new(new_atomic_ptr(WorkerNode {
+            worker: Arc::new(crate::qsbr::WorkerState::default()),
+            next: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+        }));
+        let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
+        let bloom_filter = Arc::new(new_atomic_ptr(SimpleBloom::<512>::new()));
+        let hot_index = Arc::new(DualCacheFF::new(crate::Config::with_memory_budget(1, 1)));
+        
+        let rx = Arc::new(crate::queue::BoundedQueue::new(16));
+        let mut partition = Partition::new(
+            alloc::boxed::Box::new(crate::platform::StdMessageQueue { rx }),
+            columns.clone(),
+            wal,
+            workers,
+            "test_part".to_string(),
+            Arc::new(crate::platform::StdFileSystem),
+            shared_pointers,
+            bloom_filter,
+            hot_index,
+            1,
+        );
+
+        // Test logging wal
+        let cmd = WriteCommand::Delete { entity_id: 10 };
+        partition.log_wal(&cmd);
+
+        // Test apply command write delete
+        partition.apply_command(PartitionCommand::Write(WriteCommand::Delete { entity_id: 10 }));
+
+        // Test insert to trigger column creation and process_promote
+        let mut attrs = crate::AHashMap::default();
+        attrs.insert("s".to_string(), crate::commands::ColumnValue::Str("a".to_string()));
+        attrs.insert("i".to_string(), crate::commands::ColumnValue::Int(1));
+        attrs.insert("b".to_string(), crate::commands::ColumnValue::Blob(vec![1]));
+        partition.apply_command(PartitionCommand::Write(crate::commands::WriteCommand::insert(20, attrs)));
+        
+        // Test rebuild bloom filter manually
+        partition.rebuild_bloom_filter();
+
+        // Test process_promote
+        let mut ptr_map = AHashMap::default();
+        let mut attrs_str = crate::commands::Attributes::new();
+        attrs_str.insert("s2".to_string(), "b".to_string());
+        let mut attrs_int = crate::commands::Attributes::new();
+        attrs_int.insert("i2".to_string(), 2);
+        let mut attrs_blob = crate::commands::Attributes::new();
+        attrs_blob.insert("b2".to_string(), vec![2]);
+        
+        let entity_data = crate::storage::EntityData {
+            entity_id: 30,
+            attributes: attrs_str,
+            attributes_int: attrs_int,
+            attributes_blob: attrs_blob,
+        };
+        partition.process_promote(&mut ptr_map, entity_data);
+
+        // Test replay wal (NoopWal returns empty so it shouldn't panic)
+        partition.replay_wal();
+        
+        // Test applying batch with multiple commands
+        let batch = PartitionCommand::Write(WriteCommand::BatchInsert(vec![(
+            40,
+            crate::commands::Attributes::new(),
+            crate::commands::Attributes::new(),
+            crate::commands::Attributes::new(),
+        )]));
+        partition.apply_batch_commands(vec![batch]);
+    }
+}
+
