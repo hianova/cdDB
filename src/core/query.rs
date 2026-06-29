@@ -1,12 +1,20 @@
+use crate::core::AHashMap;
+use crate::core::bloom::SimpleBloom;
+use crate::core::column::{ColumnArray, Columns, MultiVectorPointer};
+#[cfg(feature = "std")]
+use crate::core::commands::PartitionCommand;
+use crate::core::qsbr::{WorkerNode, WorkerState};
+#[cfg(feature = "std")]
+use crate::core::queue::BoundedQueue;
+use crate::core::rcu::load_ref;
+use crate::io::storage::Storage;
+use crate::io::wal::WalProvider;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::String;
-use crate::partition::MultiVectorPointer;
-use crate::dispatcher::PartitionRoute;
-use crate::qsbr::WorkerState;
-use crate::unsafe_core::load_ref;
-#[cfg(feature = "std")]
-use crate::commands::PartitionCommand;
+use core::sync::atomic::AtomicPtr;
+#[cfg(feature = "dualcache-ff")]
+use dualcache_ff::DualCacheFF;
 
 /// A single logical operation within a query plan.
 ///
@@ -20,11 +28,11 @@ pub enum QueryNode<'a> {
     /// The engine tries integer, string, and blob columns in order and returns
     /// the first match. Yields [`QueryResult::None`] when the entity or
     /// attribute does not exist.
-    Get { 
+    Get {
         /// The entity ID to look up.
-        entity_id: usize, 
+        entity_id: usize,
         /// The name of the attribute column to read.
-        attr: &'a str 
+        attr: &'a str,
     },
     /// Follow an integer foreign-key attribute on one entity to read an
     /// attribute on the referenced entity (within the same partition).
@@ -46,7 +54,7 @@ pub enum QueryNode<'a> {
     /// [`QueryResult::None`] when the entity or attribute is not found.
     Range {
         /// The entity ID that anchors the start of the range.
-        entity_id: usize, 
+        entity_id: usize,
         /// The name of the integer attribute column to read.
         attr: &'a str,
         /// The maximum number of successive elements to return.
@@ -58,9 +66,9 @@ pub enum QueryNode<'a> {
     /// [`QueryResult::StrList`], or [`QueryResult::BlobList`] depending on
     /// the column type. Yields [`QueryResult::None`] when the column does not
     /// exist.
-    Scan { 
+    Scan {
         /// The name of the attribute column to scan.
-        attr: &'a str 
+        attr: &'a str,
     },
     /// Apply a vectorized aggregation operation to an integer attribute column.
     ///
@@ -142,7 +150,9 @@ pub struct Bump<T> {
 impl<T: Clone> Bump<T> {
     /// Create a new, empty `Bump` allocator.
     pub fn new() -> Self {
-        Self { chunks: core::cell::RefCell::new(Vec::new()) }
+        Self {
+            chunks: core::cell::RefCell::new(Vec::new()),
+        }
     }
 
     /// Push `data` into the internal arena and return a stable slice reference.
@@ -263,8 +273,8 @@ impl<'a, const N: usize> QuerySession<'a, N> {
     /// acquired here is released by the [`Drop`] implementation.
     pub fn new(route: &'a PartitionRoute<N>, worker: &'a WorkerState) -> Self {
         worker.enter();
-        Self { 
-            route, 
+        Self {
+            route,
             worker,
             int_arena: Bump::new(),
             str_arena: Bump::new(),
@@ -321,19 +331,20 @@ impl<'a, const N: usize> QuerySession<'a, N> {
                 } => {
                     if let Some(ptr) = self.get_pointer(*entity_id)
                         && let Some(&start_idx) = ptr.attribute_indices.get(*attr)
-                            && let Some(col) = self.route.get_column_int(attr, self.worker) {
-                                let range_vals = col.with_data_pinned(|data| {
-                                    data.iter()
-                                        .skip(start_idx)
-                                        .take(*len)
-                                        .flatten()
-                                        .cloned()
-                                        .collect::<Vec<u32>>()
-                                });
-                                let slice = self.int_arena.alloc(range_vals);
-                                cb(QueryResult::IntRange(slice));
-                                continue;
-                            }
+                        && let Some(col) = self.route.get_column_int(attr, self.worker)
+                    {
+                        let range_vals = col.with_data_pinned(|data| {
+                            data.iter()
+                                .skip(start_idx)
+                                .take(*len)
+                                .flatten()
+                                .cloned()
+                                .collect::<Vec<u32>>()
+                        });
+                        let slice = self.int_arena.alloc(range_vals);
+                        cb(QueryResult::IntRange(slice));
+                        continue;
+                    }
                     cb(QueryResult::None);
                 }
                 QueryNode::Scan { attr } => {
@@ -345,15 +356,33 @@ impl<'a, const N: usize> QuerySession<'a, N> {
                         cb(QueryResult::IntList(slice));
                     } else if let Some(col) = self.route.get_column_str(attr, self.worker) {
                         let vals = col.with_data_pinned(|data| {
-                            let data_ref = unsafe { core::mem::transmute::<&_, &'a crate::column::ColumnData<String>>(data) };
-                            data_ref.iter().flatten().map(|s| s.as_str()).collect::<Vec<&'a str>>()
+                            let data_ref = unsafe {
+                                core::mem::transmute::<
+                                    &_,
+                                    &'a crate::core::column::ColumnData<String>,
+                                >(data)
+                            };
+                            data_ref
+                                .iter()
+                                .flatten()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<&'a str>>()
                         });
                         let slice = self.str_arena.alloc(vals);
                         cb(QueryResult::StrList(slice));
                     } else if let Some(col) = self.route.get_column_blob(attr, self.worker) {
                         let vals = col.with_data_pinned(|data| {
-                            let data_ref = unsafe { core::mem::transmute::<&_, &'a crate::column::ColumnData<Vec<u8>>>(data) };
-                            data_ref.iter().flatten().map(|s| s.as_slice()).collect::<Vec<&'a [u8]>>()
+                            let data_ref = unsafe {
+                                core::mem::transmute::<
+                                    &_,
+                                    &'a crate::core::column::ColumnData<Vec<u8>>,
+                                >(data)
+                            };
+                            data_ref
+                                .iter()
+                                .flatten()
+                                .map(|s| s.as_slice())
+                                .collect::<Vec<&'a [u8]>>()
                         });
                         let slice = self.blob_arena.alloc(vals);
                         cb(QueryResult::BlobList(slice));
@@ -398,13 +427,20 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         // 1. Memory Index Check (Wait-Free RCU) - Primary Hot Path
         let snap = load_ref(&self.route.shared_pointers);
         if let Some(p) = snap.get(&entity_id) {
-            let _ = self.route.hot_index.get(&(self.route.partition_id, entity_id)); // Track hit
+            // Track hit
             return Some(p);
         }
 
         // 2. Bloom Filter Check
-        let bloom = crate::unsafe_core::load_ref(&self.route.bloom_filter);
+        let bloom = crate::core::rcu::load_ref(&self.route.bloom_filter);
         if !bloom.contains(&entity_id) {
+            return None;
+        }
+
+        // 3. Storage Index Check (Wait-Free RCU Check)
+        // Since `InternalLoad` blocks the wait-free thread and waits for the background
+        // thread to process the command, we check the wait-free RCU disk index first.
+        if !self.route.storage.contains(entity_id) {
             return None;
         }
 
@@ -417,10 +453,10 @@ impl<'a, const N: usize> QuerySession<'a, N> {
                 entity_id,
                 response_tx: alloc::boxed::Box::new(tx),
             });
-            
+
             let _res: Option<MultiVectorPointer> = rx.recv().unwrap_or(None);
             self.worker.enter();
-            
+
             // Re-check after load
             let snap = load_ref(&self.route.shared_pointers);
             snap.get(&entity_id)
@@ -433,37 +469,58 @@ impl<'a, const N: usize> QuerySession<'a, N> {
 
     /// Fetch a string attribute for an entity.
     pub fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
-        if let Some(ptr) = self.get_pointer(entity_id)
-            && let Some(&idx) = ptr.attribute_indices.get(attr) {
-                return self
-                    .route
-                    .get_column_str(attr, self.worker)
-                    .and_then(|col| col.get_element_pinned(idx));
+        #[cfg(feature = "dualcache-ff")]
+        {
+            let handle = self.route.hot_index.register_thread();
+            let _pin = dualcache_ff::core::qsbr::pin(handle.qsbr_node);
+
+            if let Some(_) = self
+                .route
+                .hot_index
+                .get(&(self.route.partition_id, entity_id), &handle)
+            {
+                let node = self.get_pointer(entity_id)?;
+                let idx = *node.attribute_indices.get(attr)?;
+                let cols = crate::core::rcu::load_ref(&self.route.columns);
+                let col = cols.str_cols.get(attr)?;
+                return col.get_element_pinned(idx);
             }
+        }
+
+        if let Some(ptr) = self.get_pointer(entity_id)
+            && let Some(&idx) = ptr.attribute_indices.get(attr)
+        {
+            return self
+                .route
+                .get_column_str(attr, self.worker)
+                .and_then(|col| col.get_element_pinned(idx));
+        }
         None
     }
 
     /// Fetch an integer attribute for an entity.
     pub fn get_int(&self, entity_id: usize, attr: &str) -> Option<u32> {
         if let Some(ptr) = self.get_pointer(entity_id)
-            && let Some(&idx) = ptr.attribute_indices.get(attr) {
-                return self
-                    .route
-                    .get_column_int(attr, self.worker)
-                    .and_then(|col| col.get_element_pinned(idx));
-            }
+            && let Some(&idx) = ptr.attribute_indices.get(attr)
+        {
+            return self
+                .route
+                .get_column_int(attr, self.worker)
+                .and_then(|col| col.get_element_pinned(idx));
+        }
         None
     }
 
     /// Fetch a blob attribute for an entity.
     pub fn get_blob(&self, entity_id: usize, attr: &str) -> Option<Vec<u8>> {
         if let Some(ptr) = self.get_pointer(entity_id)
-            && let Some(&idx) = ptr.attribute_indices.get(attr) {
-                return self
-                    .route
-                    .get_column_blob(attr, self.worker)
-                    .and_then(|col| col.get_element_pinned(idx));
-            }
+            && let Some(&idx) = ptr.attribute_indices.get(attr)
+        {
+            return self
+                .route
+                .get_column_blob(attr, self.worker)
+                .and_then(|col| col.get_element_pinned(idx));
+        }
         None
     }
 
@@ -473,12 +530,13 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         F: FnOnce(&str) -> R,
     {
         if let Some(ptr) = self.get_pointer(entity_id)
-            && let Some(&idx) = ptr.attribute_indices.get(attr) {
-                return self
-                    .route
-                    .get_column_str(attr, self.worker)
-                    .and_then(|col| col.with_element_pinned(idx, |s| f(s)));
-            }
+            && let Some(&idx) = ptr.attribute_indices.get(attr)
+        {
+            return self
+                .route
+                .get_column_str(attr, self.worker)
+                .and_then(|col| col.with_element_pinned(idx, |s| f(s)));
+        }
         None
     }
 
@@ -488,12 +546,13 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         F: FnOnce(&[u8]) -> R,
     {
         if let Some(ptr) = self.get_pointer(entity_id)
-            && let Some(&idx) = ptr.attribute_indices.get(attr) {
-                return self
-                    .route
-                    .get_column_blob(attr, self.worker)
-                    .and_then(|col| col.with_element_pinned(idx, |b| f(b)));
-            }
+            && let Some(&idx) = ptr.attribute_indices.get(attr)
+        {
+            return self
+                .route
+                .get_column_blob(attr, self.worker)
+                .and_then(|col| col.with_element_pinned(idx, |b| f(b)));
+        }
         None
     }
 
@@ -503,14 +562,20 @@ impl<'a, const N: usize> QuerySession<'a, N> {
             let payload_idx = ptr.attribute_indices.get("payload")?;
             let epoch_idx = ptr.attribute_indices.get("epoch")?;
             let type_idx = ptr.attribute_indices.get("type")?;
-            
-            let payload = self.route.get_column_blob("payload", self.worker)?
+
+            let payload = self
+                .route
+                .get_column_blob("payload", self.worker)?
                 .get_element_pinned(*payload_idx)?;
-            let epoch = self.route.get_column_int("epoch", self.worker)?
+            let epoch = self
+                .route
+                .get_column_int("epoch", self.worker)?
                 .get_element_pinned(*epoch_idx)?;
-            let record_type = self.route.get_column_int("type", self.worker)?
+            let record_type = self
+                .route
+                .get_column_int("type", self.worker)?
                 .get_element_pinned(*type_idx)?;
-                
+
             return Some((payload, epoch, record_type));
         }
         None
@@ -541,6 +606,176 @@ impl<'a, const N: usize> Drop for QuerySession<'a, N> {
     }
 }
 
+/// A `PartitionRoute<N>` is created during partition registration and inserted
+/// into [`CdDBDispatcher::route_table`]. It is cheaply `Arc`-cloned: the
+/// dispatcher, the [`UserWriter`], and every active query thread all hold a
+/// reference to the same route without copying any data.
+///
+/// All pointer fields that are updated by the background write thread (columns,
+/// bloom filter, shared pointers) use RCU-style [`AtomicPtr`] swaps coordinated
+/// by the QSBR epoch mechanism, making reads fully wait-free.
+#[derive(Clone)]
+pub struct PartitionRoute<const N: usize> {
+    /// Human-readable name used to look up this route in
+    /// [`CdDBDispatcher::route_table`].
+    pub name: String,
+    /// Unique numeric identifier for this partition, scoped to the
+    /// dispatcher instance. Used to namespace cache keys as
+    /// `(partition_id, entity_id)`.
+    pub partition_id: u32,
+    /// Sending end of the partition's lock-free command queue (`std` build).
+    /// Write commands are pushed here by [`UserWriter::send`] /
+    /// [`UserWriter::try_send`] and drained by the background worker thread.
+    #[cfg(feature = "std")]
+    pub writer_tx: Arc<BoundedQueue<PartitionCommand>>,
+    /// Sending end of the partition's command channel (`no_std` build).
+    /// The concrete type is provided by the application and must implement
+    /// [`MessageSender`](crate::io::platform::MessageSender).
+    #[cfg(not(feature = "std"))]
+    pub writer_tx: Arc<dyn crate::io::platform::MessageSender>,
+    /// RCU pointer to the partition's [`Columns<N>`] store. Readers load this
+    /// atomically while QSBR-pinned; the background thread swaps it after each
+    /// schema-modifying write.
+    pub columns: Arc<AtomicPtr<Columns<N>>>,
+    /// RCU pointer to the map from entity ID to [`MultiVectorPointer`], which
+    /// locates an entity's data across all column arrays. Updated atomically
+    /// by the write thread using QSBR epoch synchronisation.
+    pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
+    /// Reference to the global [`DualCacheFF`] hot-index shared by all
+    /// partitions. Keyed by `(partition_id, entity_id)` so that cache
+    /// eviction decisions span the full working set.
+    #[cfg(feature = "dualcache-ff")]
+    pub hot_index: Arc<
+        DualCacheFF<
+            (u32, usize),
+            (),
+            dualcache_ff::core::DefaultExponentialPolicy,
+            64,
+            4096,
+            262144,
+            266304,
+        >,
+    >,
+    /// RCU pointer to the partition's [`SimpleBloom<N>`] filter. Consulted
+    /// during reads to short-circuit storage lookups for absent keys.
+    pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
+    /// Persistent key-value storage engine for this partition. Used for
+    /// spilling data beyond the in-memory budget and for recovery after restart.
+    pub storage: Arc<Storage>,
+    /// Atomic pointer to the head of this partition's QSBR worker linked-list.
+    /// Each read thread that registers via [`register_worker`](Self::register_worker)
+    /// prepends a [`WorkerNode`] here so the write path can track epoch
+    /// progress across all readers.
+    pub workers: Arc<AtomicPtr<WorkerNode>>,
+    /// Write-ahead log provider for this partition. Receives serialised
+    /// [`WriteCommand`]s before they are applied in-memory, enabling crash
+    /// recovery via [`Partition::replay_wal`].
+    pub wal: Arc<dyn WalProvider>,
+}
+
+impl<const N: usize> PartitionRoute<N> {
+    /// Get a point-in-time snapshot of the shared multi-vector pointers for safe reading.
+    pub fn get_snapshot(&self) -> AHashMap<usize, MultiVectorPointer> {
+        crate::core::rcu::load_clone(&self.shared_pointers)
+    }
+
+    /// Register a new QSBR worker thread and return its state tracker.
+    pub fn register_worker(&self) -> Arc<WorkerState> {
+        let worker = Arc::new(WorkerState::new());
+        let new_node =
+            alloc::boxed::Box::into_raw(alloc::boxed::Box::new(crate::core::qsbr::WorkerNode {
+                worker: Arc::clone(&worker),
+                next: crate::core::atomic::AtomicPtr::new(core::ptr::null_mut()),
+            }));
+        loop {
+            let head = self.workers.load(crate::core::atomic::Ordering::Acquire);
+            unsafe {
+                crate::core::rcu::link_node(new_node, |n| &n.next, head);
+            }
+            if self
+                .workers
+                .compare_exchange(
+                    head,
+                    new_node,
+                    crate::core::atomic::Ordering::Release,
+                    crate::core::atomic::Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
+        worker
+    }
+
+    /// Look up a string column by name.
+    ///
+    /// **Caller contract**: this must be invoked while the calling thread is
+    /// already within a QSBR-pinned region (i.e. inside a `QuerySession`, or
+    /// after a manual `worker.enter()` call). The method itself does **not**
+    /// call `enter()`/`leave()` — doing so inside an already-pinned session
+    /// would cause spurious double epoch-writes on the worker's `local_epoch`
+    /// cache line, degrading coherency under multi-thread read pressure.
+    pub fn get_column_str(
+        &self,
+        name: &str,
+        _worker: &WorkerState,
+    ) -> Option<Arc<ColumnArray<String, N>>> {
+        let cols = crate::core::rcu::load_ref(&self.columns);
+        cols.str_cols.get(name).cloned()
+    }
+
+    /// Look up an integer column by name.
+    ///
+    /// See `get_column_str` for the caller QSBR contract.
+    pub fn get_column_int(
+        &self,
+        name: &str,
+        _worker: &WorkerState,
+    ) -> Option<Arc<ColumnArray<u32, N>>> {
+        let cols = crate::core::rcu::load_ref(&self.columns);
+        cols.int_cols.get(name).cloned()
+    }
+
+    /// Look up a blob column by name.
+    ///
+    /// See `get_column_str` for the caller QSBR contract.
+    pub fn get_column_blob(
+        &self,
+        name: &str,
+        _worker: &WorkerState,
+    ) -> Option<Arc<ColumnArray<Vec<u8>, N>>> {
+        let cols = crate::core::rcu::load_ref(&self.columns);
+        cols.blob_cols.get(name).cloned()
+    }
+
+    /// Return the number of entities currently resident in memory.
+    ///
+    /// See `get_column_str` for the caller QSBR contract.
+    pub fn len(&self, _worker: &WorkerState) -> usize {
+        let snap = crate::core::rcu::load_ref(&self.shared_pointers);
+        snap.len()
+    }
+
+    /// Execute a batch of query nodes under a single QSBR pin.
+    ///
+    /// This is the primary API for callers that process multiple queries
+    /// at once (e.g. a network session handling a Redis pipeline). The
+    /// caller does not need to know about `WorkerState` or QSBR epochs.
+    pub fn execute_batch<'b, F>(&self, nodes: &[QueryNode<'b>], cb: F)
+    where
+        F: FnMut(QueryResult),
+    {
+        let q = Query::new(self);
+        q.execute_with_cb(nodes, cb);
+    }
+
+    /// Trigger a synchronous WAL flush to durable storage
+    pub fn flush_wal(&self) -> Result<(), String> {
+        self.wal.checkpoint()
+    }
+}
+
 impl<'a, const N: usize> Query<'a, N> {
     /// Insert an entity ID into the partition's bloom filter for speculative
     /// reads.
@@ -550,7 +785,7 @@ impl<'a, const N: usize> Query<'a, N> {
     /// filter is consulted before triggering a synchronous page fault; seeding
     /// it early avoids a false-negative that would otherwise skip the disk load.
     pub fn seed_bloom_filter(&self, entity_id: usize) {
-        let bloom = crate::unsafe_core::load_ref(&self.route.bloom_filter);
+        let bloom = crate::core::rcu::load_ref(&self.route.bloom_filter);
         bloom.insert(&entity_id);
     }
 
@@ -582,17 +817,17 @@ impl<'a, const N: usize> Query<'a, N> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use crate::column::{ColumnArray, ColumnData, Columns};
-    use crate::qsbr::QsbrManager;
-    use crate::unsafe_core::{load_clone, swap_ptr, new_atomic_ptr};
-    use crate::bloom::SimpleBloom;
-    use crate::partition::MultiVectorPointer;
-    use crate::dispatcher::PartitionRoute;
-    use crate::wal::NoopWal;
+    use crate::core::atomic::AtomicPtr;
+    use crate::core::bloom::SimpleBloom;
+    use crate::core::column::MultiVectorPointer;
+    use crate::core::column::{ColumnArray, ColumnData, Columns};
+    use crate::core::qsbr::QsbrManager;
+    use crate::core::query::PartitionRoute;
+    use crate::core::rcu::{load_clone, new_atomic_ptr, swap_ptr};
+    use crate::io::wal::NoopWal;
+    use alloc::string::ToString;
     use alloc::sync::Arc;
     use alloc::vec;
-    use alloc::string::ToString;
-    use crate::sync::atomic::AtomicPtr;
 
     /// Helper: build a minimal PartitionRoute with pre-populated data.
     /// Inserts entity_id=0 with: int "score"=42, str "name"="alice", blob "data"=[1,2,3]
@@ -605,8 +840,8 @@ mod tests {
         {
             int_col.acquire_lock();
             let mut data = load_clone(&int_col.data);
-            data.push(42);   // idx 0
-            data.push(100);  // idx 1
+            data.push(42); // idx 0
+            data.push(100); // idx 1
             let old = swap_ptr(&int_col.data, data);
             // We don't have qsbr here in the route, just leak the old ptr for test simplicity
             let _ = old;
@@ -618,7 +853,7 @@ mod tests {
             str_col.acquire_lock();
             let mut data = load_clone(&str_col.data);
             data.push("alice".to_string()); // idx 0
-            data.push("bob".to_string());   // idx 1
+            data.push("bob".to_string()); // idx 1
             let old = swap_ptr(&str_col.data, data);
             let _ = old;
             str_col.release_lock();
@@ -645,15 +880,19 @@ mod tests {
         // -- Build shared_pointers (entity pointers) --
         let mut pointers = crate::AHashMap::default();
         {
-            let mut ptr0 = MultiVectorPointer::default();
-            ptr0.entity_id = 0;
+            let mut ptr0 = MultiVectorPointer {
+                entity_id: 0,
+                ..Default::default()
+            };
             ptr0.attribute_indices.insert("score".to_string(), 0);
             ptr0.attribute_indices.insert("name".to_string(), 0);
             ptr0.attribute_indices.insert("data".to_string(), 0);
             pointers.insert(0, ptr0);
 
-            let mut ptr1 = MultiVectorPointer::default();
-            ptr1.entity_id = 1;
+            let mut ptr1 = MultiVectorPointer {
+                entity_id: 1,
+                ..Default::default()
+            };
             ptr1.attribute_indices.insert("score".to_string(), 1);
             ptr1.attribute_indices.insert("name".to_string(), 1);
             ptr1.attribute_indices.insert("data".to_string(), 1);
@@ -663,22 +902,22 @@ mod tests {
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
 
         // DualCacheFF
-        let cache_config = crate::Config::with_memory_budget(10, 60);
+
         #[cfg(feature = "std")]
-        let (cache, _daemon) = crate::DualCacheFF::new_headless(cache_config);
+        let (cache, _daemon) = (crate::DualCacheFF::new(32, 1024), ());
         #[cfg(not(feature = "std"))]
         let cache = crate::DualCacheFF::new(cache_config);
         let hot_index = Arc::new(cache);
 
         let storage = Arc::new(crate::Storage::new(
             "/tmp/cddb_test_query".to_string(),
-            Arc::new(crate::platform::StdFileSystem),
+            Arc::new(crate::io::platform::StdFileSystem),
         ));
 
-        let route = Arc::new(PartitionRoute {
+        Arc::new(PartitionRoute {
             name: "test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(crate::queue::BoundedQueue::new(64)),
+            writer_tx: Arc::new(crate::core::queue::BoundedQueue::new(64)),
             columns: columns_ptr,
             shared_pointers,
             hot_index,
@@ -686,9 +925,7 @@ mod tests {
             storage,
             workers: workers.clone(),
             wal: Arc::new(NoopWal),
-        });
-
-        route
+        })
     }
 
     #[test]
@@ -706,8 +943,14 @@ mod tests {
 
         let mut vals = vec![];
         col.with_data_pinned(|data| {
-            let data_ref = unsafe { core::mem::transmute::<&_, &'static ColumnData<alloc::string::String>>(data) };
-            vals = data_ref.iter().flatten().map(|s| s.as_str()).collect::<Vec<&'static str>>();
+            let data_ref = unsafe {
+                core::mem::transmute::<&_, &'static ColumnData<alloc::string::String>>(data)
+            };
+            vals = data_ref
+                .iter()
+                .flatten()
+                .map(|s| s.as_str())
+                .collect::<Vec<&'static str>>();
         });
 
         assert_eq!(vals.len(), 2);
@@ -734,16 +977,30 @@ mod tests {
 
     #[test]
     fn test_query_node_debug() {
-        let node = QueryNode::Get { entity_id: 1, attr: "a" };
+        let node = QueryNode::Get {
+            entity_id: 1,
+            attr: "a",
+        };
         let s = alloc::format!("{:?}", node);
         assert!(s.contains("Get"));
         let node2 = QueryNode::Scan { attr: "b" };
         assert!(alloc::format!("{:?}", node2).contains("Scan"));
-        let node3 = QueryNode::Link { from_entity_id: 0, link_attr: "l", target_attr: "t" };
+        let node3 = QueryNode::Link {
+            from_entity_id: 0,
+            link_attr: "l",
+            target_attr: "t",
+        };
         assert!(alloc::format!("{:?}", node3).contains("Link"));
-        let node4 = QueryNode::Range { entity_id: 0, attr: "a", len: 10 };
+        let node4 = QueryNode::Range {
+            entity_id: 0,
+            attr: "a",
+            len: 10,
+        };
         assert!(alloc::format!("{:?}", node4).contains("Range"));
-        let node5 = QueryNode::Aggregate { attr: "x", op: AggregateOp::Count };
+        let node5 = QueryNode::Aggregate {
+            attr: "x",
+            op: AggregateOp::Count,
+        };
         assert!(alloc::format!("{:?}", node5).contains("Aggregate"));
     }
 
@@ -779,7 +1036,10 @@ mod tests {
     fn test_cddb_query_struct() {
         let q = CdDbQuery {
             nodes: vec![
-                QueryNode::Get { entity_id: 0, attr: "score" },
+                QueryNode::Get {
+                    entity_id: 0,
+                    attr: "score",
+                },
                 QueryNode::Scan { attr: "name" },
             ],
         };
@@ -899,7 +1159,10 @@ mod tests {
         let q = Query::new(&route);
         let mut got_int = false;
         q.execute_with_cb(
-            &[QueryNode::Get { entity_id: 0, attr: "score" }],
+            &[QueryNode::Get {
+                entity_id: 0,
+                attr: "score",
+            }],
             |r| {
                 if let QueryResult::Int(v) = r {
                     assert_eq!(v, 42);
@@ -917,7 +1180,10 @@ mod tests {
         let mut got_str = false;
         // "name" is a str column, Get node falls through int -> tries str
         q.execute_with_cb(
-            &[QueryNode::Get { entity_id: 0, attr: "name" }],
+            &[QueryNode::Get {
+                entity_id: 0,
+                attr: "name",
+            }],
             |r| {
                 if let QueryResult::Str(s) = r {
                     assert_eq!(s, "alice");
@@ -934,7 +1200,10 @@ mod tests {
         let q = Query::new(&route);
         let mut got_blob = false;
         q.execute_with_cb(
-            &[QueryNode::Get { entity_id: 0, attr: "data" }],
+            &[QueryNode::Get {
+                entity_id: 0,
+                attr: "data",
+            }],
             |r| {
                 if let QueryResult::Blob(b) = r {
                     assert_eq!(b, vec![1, 2, 3]);
@@ -951,7 +1220,10 @@ mod tests {
         let q = Query::new(&route);
         let mut got_none = false;
         q.execute_with_cb(
-            &[QueryNode::Get { entity_id: 99, attr: "score" }],
+            &[QueryNode::Get {
+                entity_id: 99,
+                attr: "score",
+            }],
             |r| {
                 if let QueryResult::None = r {
                     got_none = true;
@@ -967,9 +1239,14 @@ mod tests {
         let q = Query::new(&route);
         let mut sum = 0u64;
         q.execute_with_cb(
-            &[QueryNode::Aggregate { attr: "score", op: AggregateOp::Sum }],
+            &[QueryNode::Aggregate {
+                attr: "score",
+                op: AggregateOp::Sum,
+            }],
             |r| {
-                if let QueryResult::IntSum(v) = r { sum = v; }
+                if let QueryResult::IntSum(v) = r {
+                    sum = v;
+                }
             },
         );
         assert_eq!(sum, 142); // 42 + 100
@@ -981,9 +1258,14 @@ mod tests {
         let q = Query::new(&route);
         let mut count = 0usize;
         q.execute_with_cb(
-            &[QueryNode::Aggregate { attr: "score", op: AggregateOp::Count }],
+            &[QueryNode::Aggregate {
+                attr: "score",
+                op: AggregateOp::Count,
+            }],
             |r| {
-                if let QueryResult::Count(c) = r { count = c; }
+                if let QueryResult::Count(c) = r {
+                    count = c;
+                }
             },
         );
         assert_eq!(count, 2);
@@ -997,15 +1279,19 @@ mod tests {
         let mut max_val = 0u32;
         q.execute_with_cb(
             &[
-                QueryNode::Aggregate { attr: "score", op: AggregateOp::Min },
-                QueryNode::Aggregate { attr: "score", op: AggregateOp::Max },
+                QueryNode::Aggregate {
+                    attr: "score",
+                    op: AggregateOp::Min,
+                },
+                QueryNode::Aggregate {
+                    attr: "score",
+                    op: AggregateOp::Max,
+                },
             ],
-            |r| {
-                match r {
-                    QueryResult::IntMin(v) => min_val = v,
-                    QueryResult::IntMax(v) => max_val = v,
-                    _ => {}
-                }
+            |r| match r {
+                QueryResult::IntMin(v) => min_val = v,
+                QueryResult::IntMax(v) => max_val = v,
+                _ => {}
             },
         );
         assert_eq!(min_val, 42);
@@ -1018,9 +1304,14 @@ mod tests {
         let q = Query::new(&route);
         let mut avg = 0.0f64;
         q.execute_with_cb(
-            &[QueryNode::Aggregate { attr: "score", op: AggregateOp::Avg }],
+            &[QueryNode::Aggregate {
+                attr: "score",
+                op: AggregateOp::Avg,
+            }],
             |r| {
-                if let QueryResult::IntAvg(v) = r { avg = v; }
+                if let QueryResult::IntAvg(v) = r {
+                    avg = v;
+                }
             },
         );
         assert!((avg - 71.0).abs() < 0.01); // (42+100)/2 = 71
@@ -1032,9 +1323,14 @@ mod tests {
         let q = Query::new(&route);
         let mut got_none = false;
         q.execute_with_cb(
-            &[QueryNode::Aggregate { attr: "nonexistent", op: AggregateOp::Sum }],
+            &[QueryNode::Aggregate {
+                attr: "nonexistent",
+                op: AggregateOp::Sum,
+            }],
             |r| {
-                if let QueryResult::None = r { got_none = true; }
+                if let QueryResult::None = r {
+                    got_none = true;
+                }
             },
         );
         assert!(got_none);
@@ -1073,36 +1369,39 @@ mod tests {
 
         let mut pointers = crate::AHashMap::default();
         {
-            let mut ptr0 = MultiVectorPointer::default();
-            ptr0.entity_id = 0;
+            let mut ptr0 = MultiVectorPointer {
+                entity_id: 0,
+                ..Default::default()
+            };
             ptr0.attribute_indices.insert("link_to".to_string(), 0);
             pointers.insert(0, ptr0);
 
-            let mut ptr1 = MultiVectorPointer::default();
-            ptr1.entity_id = 1;
+            let mut ptr1 = MultiVectorPointer {
+                entity_id: 1,
+                ..Default::default()
+            };
             ptr1.attribute_indices.insert("target_name".to_string(), 1);
             pointers.insert(1, ptr1);
         }
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
 
-        let cache_config = crate::Config::with_memory_budget(10, 60);
         #[cfg(feature = "std")]
-        let (cache, _daemon) = crate::DualCacheFF::new_headless(cache_config);
+        let (cache, _daemon) = (crate::DualCacheFF::new(32, 1024), ());
         #[cfg(not(feature = "std"))]
         let cache = crate::DualCacheFF::new(cache_config);
 
         let route = Arc::new(PartitionRoute {
             name: "link_test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(crate::queue::BoundedQueue::new(64)),
+            writer_tx: Arc::new(crate::core::queue::BoundedQueue::new(64)),
             columns: columns_ptr,
             shared_pointers,
             hot_index: Arc::new(cache),
             bloom_filter: bloom,
             storage: Arc::new(crate::Storage::new(
                 "/tmp/cddb_test_link".to_string(),
-                Arc::new(crate::platform::StdFileSystem),
+                Arc::new(crate::io::platform::StdFileSystem),
             )),
             workers,
             wal: Arc::new(NoopWal),
@@ -1138,7 +1437,9 @@ mod tests {
                 target_attr: "name",
             }],
             |r| {
-                if let QueryResult::None = r { got_none = true; }
+                if let QueryResult::None = r {
+                    got_none = true;
+                }
             },
         );
         assert!(got_none);
@@ -1162,7 +1463,7 @@ mod tests {
         let q = Query::new(&route);
         // Seed and check (bloom filter should now contain entity 999)
         q.seed_bloom_filter(999);
-        let bloom = crate::unsafe_core::load_ref(&route.bloom_filter);
+        let bloom = crate::core::rcu::load_ref(&route.bloom_filter);
         assert!(bloom.contains(&999usize));
     }
 
@@ -1219,8 +1520,10 @@ mod tests {
 
         let mut pointers = crate::AHashMap::default();
         {
-            let mut ptr0 = MultiVectorPointer::default();
-            ptr0.entity_id = 0;
+            let mut ptr0 = MultiVectorPointer {
+                entity_id: 0,
+                ..Default::default()
+            };
             ptr0.attribute_indices.insert("payload".to_string(), 0);
             ptr0.attribute_indices.insert("epoch".to_string(), 0);
             ptr0.attribute_indices.insert("type".to_string(), 0);
@@ -1229,23 +1532,22 @@ mod tests {
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
 
-        let cache_config = crate::Config::with_memory_budget(10, 60);
         #[cfg(feature = "std")]
-        let (cache, _daemon) = crate::DualCacheFF::new_headless(cache_config);
+        let (cache, _daemon) = (crate::DualCacheFF::new(32, 1024), ());
         #[cfg(not(feature = "std"))]
         let cache = crate::DualCacheFF::new(cache_config);
 
         let route = Arc::new(PartitionRoute {
             name: "signed_test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(crate::queue::BoundedQueue::new(64)),
+            writer_tx: Arc::new(crate::core::queue::BoundedQueue::new(64)),
             columns: columns_ptr,
             shared_pointers,
             hot_index: Arc::new(cache),
             bloom_filter: bloom,
             storage: Arc::new(crate::Storage::new(
                 "/tmp/cddb_test_signed".to_string(),
-                Arc::new(crate::platform::StdFileSystem),
+                Arc::new(crate::io::platform::StdFileSystem),
             )),
             workers,
             wal: Arc::new(NoopWal),
@@ -1272,8 +1574,14 @@ mod tests {
         let mut results = vec![];
         q.execute_with_cb(
             &[
-                QueryNode::Get { entity_id: 0, attr: "score" },
-                QueryNode::Get { entity_id: 1, attr: "score" },
+                QueryNode::Get {
+                    entity_id: 0,
+                    attr: "score",
+                },
+                QueryNode::Get {
+                    entity_id: 1,
+                    attr: "score",
+                },
                 QueryNode::Scan { attr: "score" },
             ],
             |r| {
@@ -1293,9 +1601,15 @@ mod tests {
         let q = Query::new(&route);
         let mut got_none = false;
         q.execute_with_cb(
-            &[QueryNode::Range { entity_id: 0, attr: "nonexistent", len: 5 }],
+            &[QueryNode::Range {
+                entity_id: 0,
+                attr: "nonexistent",
+                len: 5,
+            }],
             |r| {
-                if let QueryResult::None = r { got_none = true; }
+                if let QueryResult::None = r {
+                    got_none = true;
+                }
             },
         );
         assert!(got_none);
@@ -1306,7 +1620,11 @@ mod tests {
         let q = Query::new(&route);
         let mut got_range = false;
         q.execute_with_cb(
-            &[QueryNode::Range { entity_id: 0, attr: "score", len: 2 }],
+            &[QueryNode::Range {
+                entity_id: 0,
+                attr: "score",
+                len: 2,
+            }],
             |r| {
                 if let QueryResult::IntRange(slice) = r {
                     assert_eq!(slice.len(), 2);
@@ -1320,39 +1638,47 @@ mod tests {
     #[test]
     fn test_query_link_blob() {
         let route = make_test_route();
-        
-        let link_col = Arc::new(crate::column::ColumnArray::<u32, 1024>::new());
+
+        let link_col = Arc::new(crate::core::column::ColumnArray::<u32, 1024>::new());
         link_col.acquire_lock();
-        let mut data = crate::unsafe_core::load_clone(&link_col.data);
+        let mut data = crate::core::rcu::load_clone(&link_col.data);
         data.push(1); // points to entity 1
-        let _ = crate::unsafe_core::swap_ptr(&link_col.data, data);
+        let _ = crate::core::rcu::swap_ptr(&link_col.data, data);
         link_col.release_lock();
-        
-        let cols = crate::unsafe_core::load_ref(&route.columns);
+
+        let cols = crate::core::rcu::load_ref(&route.columns);
         let mut next_cols = cols.clone();
         next_cols.int_cols.insert("link".to_string(), link_col);
-        let _ = crate::unsafe_core::swap_ptr(&route.columns, next_cols);
-        
-        let ptrs = crate::unsafe_core::load_ref(&route.shared_pointers);
+        let _ = crate::core::rcu::swap_ptr(&route.columns, next_cols);
+
+        let ptrs = crate::core::rcu::load_ref(&route.shared_pointers);
         let mut next_ptrs = ptrs.clone();
         let mut p = next_ptrs.get(&0).unwrap().clone();
         p.attribute_indices.insert("link".to_string(), 0);
         next_ptrs.insert(0, p);
-        let _ = crate::unsafe_core::swap_ptr(&route.shared_pointers, next_ptrs);
-        
+        let _ = crate::core::rcu::swap_ptr(&route.shared_pointers, next_ptrs);
+
         let q = Query::new(&route);
         let mut got_blob = false;
         let mut got_none = false;
         q.execute_with_cb(
             &[
-                QueryNode::Link { from_entity_id: 0, link_attr: "link", target_attr: "data" },
-                QueryNode::Link { from_entity_id: 0, link_attr: "score", target_attr: "data" } // nonexistent target
+                QueryNode::Link {
+                    from_entity_id: 0,
+                    link_attr: "link",
+                    target_attr: "data",
+                },
+                QueryNode::Link {
+                    from_entity_id: 0,
+                    link_attr: "score",
+                    target_attr: "data",
+                }, // nonexistent target
             ],
             |r| match r {
                 QueryResult::Blob(_) => got_blob = true,
                 QueryResult::None => got_none = true,
                 _ => {}
-            }
+            },
         );
         assert!(got_blob);
         assert!(got_none);
@@ -1361,19 +1687,24 @@ mod tests {
     #[test]
     fn test_query_session_execute_aggregate_empty_avg() {
         let route = make_test_route();
-        
-        let empty_col = Arc::new(crate::column::ColumnArray::<u32, 1024>::new());
-        let cols = crate::unsafe_core::load_ref(&route.columns);
+
+        let empty_col = Arc::new(crate::core::column::ColumnArray::<u32, 1024>::new());
+        let cols = crate::core::rcu::load_ref(&route.columns);
         let mut next_cols = cols.clone();
         next_cols.int_cols.insert("empty".to_string(), empty_col);
-        let _ = crate::unsafe_core::swap_ptr(&route.columns, next_cols);
-        
+        let _ = crate::core::rcu::swap_ptr(&route.columns, next_cols);
+
         let q = Query::new(&route);
         let mut got_none = false;
         q.execute_with_cb(
-            &[QueryNode::Aggregate { attr: "empty", op: AggregateOp::Avg }],
+            &[QueryNode::Aggregate {
+                attr: "empty",
+                op: AggregateOp::Avg,
+            }],
             |r| {
-                if let QueryResult::None = r { got_none = true; }
+                if let QueryResult::None = r {
+                    got_none = true;
+                }
             },
         );
         assert!(got_none);

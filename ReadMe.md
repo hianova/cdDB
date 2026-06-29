@@ -2,7 +2,7 @@
 
 `cdDB` is a research-grade, high-performance storage engine built in Rust, designed for extreme concurrency and low-latency data access. It leverages a **Wait-Free Synchronous Architecture**, **Read-Copy-Update (RCU)**, and **Tiered Storage** to provide a robust foundation for data-intensive applications like IT operations monitoring and real-time analytics.
 
-## 🚀 Key Features
+## Key Features
 
 - **Zero-Async Tax Architecture**: Optimized for performance by using native OS threads and synchronous I/O, eliminating the overhead of asynchronous runtime executors.
 - **Wait-Free Read Path**: Uses RCU (Read-Copy-Update) with **QSBR (Quiescent State Based Reclamation)** for safe, zero-lock memory management. Single-thread read latency as low as **~38.3 ns**.
@@ -16,14 +16,13 @@
 
 ## 🏗 Project Structure
 
-`cdDB` is organized as a workspace for maximum modularity:
+`cdDB` is organized as a modular library:
 
-- **`src/`**: The core library containing the storage logic, RCU state management, and query engine.
-- **`tests/`**: Dedicated crate for functional and boundary testing.
-- **`benches/`**: Professional performance audit suite using Criterion.
-- **`examples/`**: Usage demonstrations (e.g., `it_ops_demo`).
+- **`src/`**: The core library containing the modularized storage logic, RCU/QSBR concurrency modules, I/O abstractions, and utilities.
+- **`tests/`**: Integration tests and boundary functional verification.
+- **`benches/`**: Benchmark suites auditing throughput, latency, memory, and capex.
 
-## 🛠 Getting Started
+## Getting Started
 
 ### Installation
 
@@ -82,7 +81,7 @@ db.execute_batch("users.active", &nodes, |result| {
 });
 ```
 
-### 😴 Logical Sleep / Wake Control
+### Logical Sleep / Wake Control
 
 To support power-saving and connection listener pausing when an application is suspended or idle, `cdDB` provides a logical sleep/wake state management API:
 
@@ -103,22 +102,22 @@ assert!(!db.is_sleeping());
 
 Unlike traditional shutdown/recreation, this logical state does not destroy background daemon threads (such as the `DualCache-FF` daemon or WAL flushers), avoiding high latency overhead when waking up. Instead, threads naturally fall into minimal-execution idle polling (0% CPU).
 
-For advanced embedded features, refer to the [SPEC.md](./doc/SPEC.md) document.
+For advanced embedded features, refer to the [SPEC.md](./SPEC.md) document.
 
-## 📊 Benchmarks & Performance
+## Benchmarks & Performance
 
 `cdDB` is engineered for ultra-low latency. Under Criterion and raw wall-clock thread stress testing, the performance figures are as follows:
 
 ### Running Benchmarks
 ```bash
-# Criterion throughput and latency benchmarks
-cargo bench -p cdDB-benches
+# Criterion throughput, latency, memory, and capex benchmarks
+cargo bench --no-default-features --features std
 
 # Multi-threaded pressure benchmark (wall-clock QPS + percentile latencies)
-cargo test --release -p cdDB-benches --test read_pressure_benchmark -- --nocapture
+cargo test --release --no-default-features --features std --test read_pressure_benchmark -- --nocapture
 ```
 
-For detailed metrics and historical evolution, see [PERF.md](./doc/PERF.md).
+For detailed metrics and historical evolution, see [PERF.md](./PERF.md).
 
 ## 📜 License
 

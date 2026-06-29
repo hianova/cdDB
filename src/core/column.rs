@@ -1,10 +1,10 @@
 use crate::AHashMap;
+use crate::core::atomic::{AtomicBool, AtomicPtr, Ordering};
+use crate::core::qsbr::WorkerState;
+use crate::core::rcu::{load_clone, load_ref, new_atomic_ptr};
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::String;
-use crate::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use crate::unsafe_core::{load_clone, load_ref, new_atomic_ptr};
-use crate::qsbr::WorkerState;
 
 /// A typed collection of named columnar arrays, grouped by element type.
 ///
@@ -53,6 +53,18 @@ impl<const N: usize> Columns<N> {
             blob_cols: AHashMap::default(),
         }
     }
+}
+
+/// An RCU snapshot pointer for a single entity, containing the entity ID and a map of
+/// attribute names to their column array indices.
+///
+/// This pointer is conceptually the "row" in our columnar store. By cloning this
+/// pointer (which only clones an `AHashMap` of `usize`), a reader can safely pin
+/// a specific snapshot of an entity's data.
+#[derive(Clone, Debug, Default)]
+pub struct MultiVectorPointer {
+    pub entity_id: usize,
+    pub attribute_indices: AHashMap<String, usize>,
 }
 
 /// Contiguous columnar storage for values of type `T`, paired with a
@@ -612,35 +624,35 @@ impl<T: Default + Clone, const N: usize> Default for ColumnArray<T, N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qsbr::QsbrManager;
-    use crate::unsafe_core::{load_clone, swap_ptr};
+    use crate::core::qsbr::QsbrManager;
+    use crate::core::rcu::{load_clone, swap_ptr};
 
     #[test]
     fn test_column_array_insertion() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         use alloc::sync::Arc;
         let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers);
         let col = ColumnArray::<u32, 1024>::new();
         col.acquire_lock();
-        
+
         let mut next = load_clone(&col.data);
         let idx1 = next.len();
         next.push(42);
         let mut next2 = next.clone();
         let idx2 = next2.len();
         next2.push(100);
-        
+
         let old = swap_ptr(&col.data, next2);
         qsbr.defer_free(old);
         col.release_lock();
 
         assert_eq!(idx1, 0);
         assert_eq!(idx2, 1);
-        
+
         let val1 = col.get_element_pinned(0).unwrap();
         let val2 = col.get_element_pinned(1).unwrap();
-        
+
         assert_eq!(val1, 42);
         assert_eq!(val2, 100);
     }
@@ -756,7 +768,7 @@ mod tests {
 
     #[test]
     fn test_column_array_get_element_pinned() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers);
         let col = ColumnArray::<u32, 1024>::new();
@@ -777,7 +789,7 @@ mod tests {
 
     #[test]
     fn test_column_array_with_element_pinned() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers);
         let col = ColumnArray::<String, 1024>::new();
@@ -799,7 +811,7 @@ mod tests {
 
     #[test]
     fn test_column_array_with_element() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         let workers_ptr = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers_ptr);
         let col = ColumnArray::<u32, 1024>::new();
@@ -811,7 +823,7 @@ mod tests {
         qsbr.defer_free(old);
         col.release_lock();
 
-        let worker = crate::qsbr::WorkerState::new();
+        let worker = crate::core::qsbr::WorkerState::new();
         let doubled = col.with_element(0, &worker, |v| *v * 2);
         assert_eq!(doubled, Some(84));
         let missing = col.with_element(5, &worker, |v| *v * 2);
@@ -820,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_column_array_get_element_with_worker() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         let workers_ptr = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers_ptr);
         let col = ColumnArray::<u32, 1024>::new();
@@ -832,14 +844,14 @@ mod tests {
         qsbr.defer_free(old);
         col.release_lock();
 
-        let worker = crate::qsbr::WorkerState::new();
+        let worker = crate::core::qsbr::WorkerState::new();
         assert_eq!(col.get_element(0, &worker), Some(77));
         assert_eq!(col.get_element(1, &worker), None);
     }
 
     #[test]
     fn test_column_array_with_data() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         let workers_ptr = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers_ptr);
         let col = ColumnArray::<u32, 1024>::new();
@@ -853,16 +865,14 @@ mod tests {
         qsbr.defer_free(old);
         col.release_lock();
 
-        let worker = crate::qsbr::WorkerState::new();
-        let sum = col.with_data(&worker, |data| {
-            data.iter().flatten().sum::<u32>()
-        });
+        let worker = crate::core::qsbr::WorkerState::new();
+        let sum = col.with_data(&worker, |data| data.iter().flatten().sum::<u32>());
         assert_eq!(sum, 6);
     }
 
     #[test]
     fn test_column_array_with_data_pinned() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         let workers_ptr = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers_ptr);
         let col = ColumnArray::<u32, 1024>::new();
@@ -881,7 +891,7 @@ mod tests {
 
     #[test]
     fn test_column_array_get_data_snapshot() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         let workers_ptr = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers_ptr);
         let col = ColumnArray::<u32, 1024>::new();
@@ -894,7 +904,7 @@ mod tests {
         qsbr.defer_free(old);
         col.release_lock();
 
-        let worker = crate::qsbr::WorkerState::new();
+        let worker = crate::core::qsbr::WorkerState::new();
         let snapshot = col.get_data_snapshot(&worker);
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot.get(0), Some(&5));
@@ -903,24 +913,24 @@ mod tests {
 
     #[test]
     fn test_column_array_get_waitlist_snapshot() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         let workers_ptr = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let _qsbr = QsbrManager::new(workers_ptr);
         let col = ColumnArray::<u32, 1024>::new();
 
-        let worker = crate::qsbr::WorkerState::new();
+        let worker = crate::core::qsbr::WorkerState::new();
         let wl = col.get_waitlist_snapshot(&worker);
         assert!(wl.is_empty());
     }
 
     #[test]
     fn test_column_array_data_len() {
-        use crate::sync::atomic::AtomicPtr;
+        use crate::core::atomic::AtomicPtr;
         let workers_ptr = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let mut qsbr = QsbrManager::new(workers_ptr);
         let col = ColumnArray::<u32, 1024>::new();
 
-        let worker = crate::qsbr::WorkerState::new();
+        let worker = crate::core::qsbr::WorkerState::new();
         assert_eq!(col.data_len(&worker), 0);
 
         col.acquire_lock();

@@ -1,9 +1,12 @@
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use alloc::format;
-use crate::platform::FileSystem;
 use crate::AHashMap;
+use crate::core::atomic::AtomicPtr;
+use crate::core::rcu::new_atomic_ptr;
+use crate::io::platform::FileSystem;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Represents the complete persisted state of a single entity.
 ///
@@ -47,17 +50,20 @@ impl EntityData {
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(self.entity_id as u64).to_le_bytes());
-        self.attributes.encode_to(&mut buf, |v: &String, b: &mut Vec<u8>| {
-            b.extend_from_slice(&(v.len() as u32).to_le_bytes());
-            b.extend_from_slice(v.as_bytes());
-        });
-        self.attributes_int.encode_to(&mut buf, |v: &u32, b: &mut Vec<u8>| {
-            b.extend_from_slice(&(*v).to_le_bytes());
-        });
-        self.attributes_blob.encode_to(&mut buf, |v: &Vec<u8>, b: &mut Vec<u8>| {
-            b.extend_from_slice(&(v.len() as u32).to_le_bytes());
-            b.extend_from_slice(v);
-        });
+        self.attributes
+            .encode_to(&mut buf, |v: &String, b: &mut Vec<u8>| {
+                b.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                b.extend_from_slice(v.as_bytes());
+            });
+        self.attributes_int
+            .encode_to(&mut buf, |v: &u32, b: &mut Vec<u8>| {
+                b.extend_from_slice(&(*v).to_le_bytes());
+            });
+        self.attributes_blob
+            .encode_to(&mut buf, |v: &Vec<u8>, b: &mut Vec<u8>| {
+                b.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                b.extend_from_slice(v);
+            });
         buf
     }
 
@@ -80,7 +86,9 @@ impl EntityData {
         let attributes = crate::Attributes::<String>::decode_from(buf, &mut pos, |b, p| {
             let len = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap()) as usize;
             *p += 4;
-            let s = core::str::from_utf8(b.get(*p..*p + len).unwrap()).unwrap().to_string();
+            let s = core::str::from_utf8(b.get(*p..*p + len).unwrap())
+                .unwrap()
+                .to_string();
             *p += len;
             s
         })?;
@@ -118,7 +126,7 @@ impl EntityData {
 /// - [`Storage::compact`] rewrites the file, keeping only the most-recent record
 ///   per entity and atomically swapping in the compacted file.
 ///
-/// All mutable state is guarded by `crate::sync::Mutex` so that a `Storage`
+/// All mutable state is guarded by `crate::core::Mutex` so that a `Storage`
 /// instance can be shared across threads.
 pub struct Storage {
     /// Filesystem path to the partition directory that contains `entities.bin`.
@@ -126,25 +134,30 @@ pub struct Storage {
     /// Filesystem abstraction used for all I/O; supports both the standard
     /// library and `no_std` environments through the [`FileSystem`] trait.
     pub fs: Arc<dyn FileSystem>,
-    /// Maps each entity ID to its `(byte_offset, payload_length)` within
-    /// `entities.bin`, where `byte_offset` points at the 4-byte length prefix
-    /// and `payload_length` is the size of the payload that follows it.
-    /// Enables O(1) random access without directory scanning.
-    pub disk_index: crate::sync::Mutex<AHashMap<usize, (u64, u32)>>,
+    /// Wait-free snapshot of the disk index for concurrent readers
+    pub disk_index: Arc<AtomicPtr<AHashMap<usize, (u64, u32)>>>,
+    /// The mutable disk index mapping `entity_id` to `(offset, length)` inside the file.
+    /// This is updated by the background thread as entities are written to disk.
+    #[cfg(feature = "std")]
+    pub next_disk_index: std::sync::Mutex<AHashMap<usize, (u64, u32)>>,
+    #[cfg(not(feature = "std"))]
+    pub next_disk_index: spin::Mutex<AHashMap<usize, (u64, u32)>>,
+    /// Tracks whether next_disk_index has been modified since the last swap
+    pub disk_index_dirty: AtomicBool,
     /// The byte offset at which the *next* record will be appended.
     /// Updated atomically alongside `disk_index` on every successful write.
-    pub current_offset: crate::sync::Mutex<u64>,
+    pub current_offset: crate::core::Mutex<u64>,
     /// Buffered file writer for `entities.bin` (64 KiB capacity).
     /// `None` if the file could not be opened or after a `compact()` swap.
     /// Only present on `std` targets.
     #[cfg(feature = "std")]
-    pub writer: crate::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+    pub writer: crate::core::Mutex<Option<std::io::BufWriter<std::fs::File>>>,
     /// Memory-mapped read view of `entities.bin`.
     /// Lazily created on the first read and invalidated (set to `None`) after
     /// `compact()` replaces the underlying file.
     /// Only present on `std` targets.
     #[cfg(feature = "std")]
-    pub mmap: crate::sync::Mutex<Option<alloc::sync::Arc<memmap2::Mmap>>>,
+    pub mmap: crate::core::Mutex<Option<alloc::sync::Arc<memmap2::Mmap>>>,
 }
 
 impl Storage {
@@ -173,25 +186,29 @@ impl Storage {
             let file_opt = OpenOptions::new()
                 .create(true)
                 .append(true)
-                
                 .open(&path)
                 .ok()
                 .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
-            crate::sync::Mutex::new(file_opt)
+            crate::core::Mutex::new(file_opt)
         };
 
-        let storage = Self {
+        let mut s = Self {
             base_path,
             fs,
-            disk_index: crate::sync::Mutex::new(AHashMap::default()),
-            current_offset: crate::sync::Mutex::new(0),
+            disk_index: Arc::new(new_atomic_ptr(AHashMap::default())),
+            #[cfg(feature = "std")]
+            next_disk_index: std::sync::Mutex::new(AHashMap::default()),
+            #[cfg(not(feature = "std"))]
+            next_disk_index: spin::Mutex::new(AHashMap::default()),
+            disk_index_dirty: AtomicBool::new(false),
+            current_offset: crate::core::Mutex::new(0),
             #[cfg(feature = "std")]
             writer,
             #[cfg(feature = "std")]
-            mmap: crate::sync::Mutex::new(None),
+            mmap: crate::core::Mutex::new(None),
         };
-        storage.rebuild_disk_index();
-        storage
+        s.rebuild_disk_index();
+        s
     }
 
     fn rebuild_disk_index(&self) {
@@ -203,11 +220,11 @@ impl Storage {
             let mut pos = 0;
             let mut map = AHashMap::default();
             while pos + 4 <= bytes.len() {
-                let len = u32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
                 let record_start = pos as u64;
                 pos += 4;
                 if pos + len <= bytes.len() {
-                    if let Some(entity_id) = Self::peek_entity_id(&bytes[pos..pos+len]) {
+                    if let Some(entity_id) = Self::peek_entity_id(&bytes[pos..pos + len]) {
                         map.insert(entity_id, (record_start, len as u32));
                     }
                     pos += len;
@@ -217,18 +234,19 @@ impl Storage {
             }
             #[cfg(feature = "std")]
             {
-                let mut index = self.disk_index.lock().unwrap();
+                let mut index = self.next_disk_index.lock().unwrap();
                 *index = map;
                 let mut off = self.current_offset.lock().unwrap();
                 *off = pos as u64;
             }
             #[cfg(not(feature = "std"))]
             {
-                let mut index = self.disk_index.lock();
+                let mut index = self.next_disk_index.lock();
                 *index = map;
                 let mut off = self.current_offset.lock();
                 *off = pos as u64;
             }
+            self.swap_disk_index();
         }
     }
 
@@ -259,10 +277,32 @@ impl Storage {
             if let Some(w) = lock.as_mut() {
                 use std::io::Write;
                 w.flush().map_err(|e| e.to_string())?;
-                w.get_ref().sync_data().map_err(|e| e.to_string())?;
+                // We do NOT call w.get_ref().sync_data() here. Durability is handled by the WAL layer.
+                // Forcing fdatasync on the cold storage layer on every batch kills performance needlessly.
             }
         }
         Ok(())
+    }
+
+    /// Fast-path check to determine if an entity exists on disk without loading it.
+    /// Use this for wait-free exact disk index checks before disk loads.
+    pub fn contains(&self, entity_id: usize) -> bool {
+        let index = crate::core::rcu::load_ref(&self.disk_index);
+        index.contains_key(&entity_id)
+    }
+
+    /// Swaps the `next_disk_index` into `disk_index` if changes have occurred.
+    /// Returns the old `AHashMap` pointer for QSBR memory reclamation, or `null` if no changes occurred.
+    pub fn swap_disk_index(&self) -> *mut AHashMap<usize, (u64, u32)> {
+        if !self.disk_index_dirty.swap(false, Ordering::Acquire) {
+            return core::ptr::null_mut();
+        }
+        #[cfg(feature = "std")]
+        let next = self.next_disk_index.lock().unwrap().clone();
+        #[cfg(not(feature = "std"))]
+        let next = self.next_disk_index.lock().clone();
+
+        crate::core::rcu::swap_ptr(&self.disk_index, next)
     }
 
     /// Appends an entity to `entities.bin` as a length-prefixed record and
@@ -287,14 +327,13 @@ impl Storage {
     pub fn write_entity(&self, data: &EntityData) -> Result<(), String> {
         let path = format!("{}/entities.bin", self.base_path);
         let bytes = data.encode();
-        
+
         let mut record = Vec::with_capacity(4 + bytes.len());
         record.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
         record.extend_from_slice(&bytes);
 
         #[cfg(feature = "std")]
         {
-            let mut index = self.disk_index.lock().unwrap();
             let mut off_lock = self.current_offset.lock().unwrap();
             let offset = *off_lock;
 
@@ -311,25 +350,36 @@ impl Storage {
 
             if !use_fallback {
                 *off_lock = offset + record.len() as u64;
+                #[cfg(feature = "std")]
+                let mut index = self.next_disk_index.lock().unwrap();
+                #[cfg(not(feature = "std"))]
+                let mut index = self.next_disk_index.lock();
                 index.insert(data.entity_id, (offset, bytes.len() as u32));
+                self.disk_index_dirty.store(true, Ordering::Release);
                 return Ok(());
             }
 
             self.fs.append(&path, &record)?;
             *off_lock = offset + record.len() as u64;
+            #[cfg(feature = "std")]
+            let mut index = self.next_disk_index.lock().unwrap();
+            #[cfg(not(feature = "std"))]
+            let mut index = self.next_disk_index.lock();
             index.insert(data.entity_id, (offset, bytes.len() as u32));
+            self.disk_index_dirty.store(true, Ordering::Release);
             Ok(())
         }
 
         #[cfg(not(feature = "std"))]
         {
-            let mut index = self.disk_index.lock();
             let mut off_lock = self.current_offset.lock();
             let offset = *off_lock;
 
             self.fs.append(&path, &record)?;
             *off_lock = offset + record.len() as u64;
+            let mut index = self.next_disk_index.lock();
             index.insert(data.entity_id, (offset, bytes.len() as u32));
+            self.disk_index_dirty.store(true, Ordering::Release);
             Ok(())
         }
     }
@@ -353,15 +403,11 @@ impl Storage {
     ///   returned `None` (malformed payload).
     /// - Any I/O error from the underlying filesystem.
     pub fn read_entity(&self, entity_id: usize) -> Result<EntityData, String> {
-        let (offset, len) = {
-            #[cfg(feature = "std")]
-            let index = self.disk_index.lock().unwrap();
-            #[cfg(not(feature = "std"))]
-            let index = self.disk_index.lock();
-            *index.get(&entity_id).ok_or("Not found in disk index")?
-        };
+        let index = crate::core::rcu::load_ref(&self.disk_index);
+        let (offset, len) = *index.get(&entity_id).ok_or("Not found in disk index")?;
+
         let path = format!("{}/entities.bin", self.base_path);
-        
+
         #[cfg(feature = "std")]
         {
             let mut remap_needed = false;
@@ -379,13 +425,14 @@ impl Storage {
                     None
                 }
             };
-            
+
             let mmap = if remap_needed {
                 if let Ok(mut w) = self.writer.lock()
-                    && let Some(writer) = w.as_mut() {
-                        use std::io::Write;
-                        let _ = writer.flush();
-                    }
+                    && let Some(writer) = w.as_mut()
+                {
+                    use std::io::Write;
+                    let _ = writer.flush();
+                }
                 let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
                 let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| e.to_string())?;
                 let arc_mmap = alloc::sync::Arc::new(mmap);
@@ -395,7 +442,7 @@ impl Storage {
             } else {
                 mmap_opt.unwrap()
             };
-            
+
             let buf = &mmap[offset as usize..(offset + len as u64 + 4) as usize];
             if buf.len() < 4 {
                 return Err("Truncated".to_string());
@@ -404,9 +451,9 @@ impl Storage {
             if buf.len() < 4 + data_len {
                 return Err("Truncated".to_string());
             }
-            EntityData::decode(&buf[4..4+data_len]).ok_or("Decode failed".to_string())
+            EntityData::decode(&buf[4..4 + data_len]).ok_or("Decode failed".to_string())
         }
-        
+
         #[cfg(not(feature = "std"))]
         {
             let bytes = self.fs.read_range(&path, offset, len as usize + 4)?;
@@ -417,7 +464,7 @@ impl Storage {
             if bytes.len() < 4 + data_len {
                 return Err("Truncated record data".to_string());
             }
-            EntityData::decode(&bytes[4..4+data_len]).ok_or("Failed to decode".to_string())
+            EntityData::decode(&bytes[4..4 + data_len]).ok_or("Failed to decode".to_string())
         }
     }
 
@@ -446,7 +493,7 @@ impl Storage {
     pub fn read_block(&self, entity_id: usize, block_size: usize) -> Vec<EntityData> {
         let start_id = (entity_id / block_size) * block_size;
         let mut block_data = Vec::new();
-        
+
         let fetch_size = block_size * 2;
         for i in 0..fetch_size {
             let id = start_id + i;
@@ -488,23 +535,25 @@ impl Storage {
         {
             let path = format!("{}/entities.bin", self.base_path);
             let tmp_path = format!("{}/entities.bin.tmp", self.base_path);
-            
+
             let (active_ids, original_offset) = {
-                let index = self.disk_index.lock().unwrap();
+                let index = self.next_disk_index.lock().unwrap();
                 let off = *self.current_offset.lock().unwrap();
                 (index.clone(), off)
             };
 
             let mut tmp_writer = std::io::BufWriter::with_capacity(
                 64 * 1024,
-                std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?
+                std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?,
             );
-            
+
             let mut new_index = AHashMap::default();
             let mut new_offset: u64 = 0;
 
             for (&id, &(off, len)) in active_ids.iter() {
-                if off >= original_offset { continue; }
+                if off >= original_offset {
+                    continue;
+                }
                 if let Ok(bytes) = self.fs.read_range(&path, off, len as usize + 4) {
                     use std::io::Write;
                     tmp_writer.write_all(&bytes).map_err(|e| e.to_string())?;
@@ -514,19 +563,19 @@ impl Storage {
             }
 
             // Phase 2: Lock and merge deltas
-            let mut index_lock = self.disk_index.lock().unwrap();
+            let mut index_lock = self.next_disk_index.lock().unwrap();
             let mut offset_lock = self.current_offset.lock().unwrap();
             let mut writer_lock = self.writer.lock().unwrap();
-            
+
             let mut delta_ids = Vec::new();
             for (&id, &(off, len)) in index_lock.iter() {
                 if off >= original_offset {
                     delta_ids.push((id, off, len));
                 }
             }
-            
+
             delta_ids.sort_by_key(|&(_, off, _)| off);
-            
+
             if let Some(w) = writer_lock.as_mut() {
                 use std::io::Write;
                 let _ = w.flush();
@@ -543,22 +592,26 @@ impl Storage {
 
             use std::io::Write;
             tmp_writer.flush().map_err(|e| e.to_string())?;
-            tmp_writer.get_ref().sync_data().map_err(|e| e.to_string())?;
+            tmp_writer
+                .get_ref()
+                .sync_data()
+                .map_err(|e| e.to_string())?;
 
             *writer_lock = None;
             let _ = std::fs::rename(&tmp_path, &path);
-            
+
             *writer_lock = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                
                 .open(&path)
                 .ok()
                 .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
-                
+
             *index_lock = new_index;
             *offset_lock = new_offset;
-            
+
+            self.disk_index_dirty.store(true, Ordering::Release);
+
             let mut mmap_lock = self.mmap.lock().unwrap();
             *mmap_lock = None;
         }
@@ -579,14 +632,14 @@ mod tests {
         attrs_int.insert("age".to_string(), 42);
         let mut attrs_blob = crate::Attributes::new();
         attrs_blob.insert("data".to_string(), vec![1, 2, 3]);
-        
+
         let data = EntityData {
             entity_id: 42,
             attributes: attrs,
             attributes_int: attrs_int,
             attributes_blob: attrs_blob,
         };
-        
+
         let buf = data.encode();
         let dec = EntityData::decode(&buf).unwrap();
         assert_eq!(dec.entity_id, 42);
@@ -598,7 +651,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn test_storage_read_write() {
-        let fs = Arc::new(crate::platform::StdFileSystem);
+        let fs = Arc::new(crate::io::platform::StdFileSystem);
         let path = "test_storage_dir";
         let _ = std::fs::remove_dir_all(path);
         let storage = Storage::new(path.to_string(), fs);
@@ -609,38 +662,39 @@ mod tests {
             attributes_blob: crate::Attributes::new(),
         };
         storage.write_entity(&data).unwrap();
+        storage.swap_disk_index();
         let read_data = storage.read_entity(10).unwrap();
         assert_eq!(read_data.entity_id, 10);
-        
+
         // Test missing entity
         assert!(storage.read_entity(999).is_err());
-        
+
         let block = storage.read_block(10, 5);
         assert!(!block.is_empty());
         assert_eq!(block[0].entity_id, 10);
-        
+
         let empty_block = storage.read_block(999, 5);
         assert!(empty_block.is_empty());
-        
+
         storage.compact().unwrap();
         let read_data2 = storage.read_entity(10).unwrap();
         assert_eq!(read_data2.entity_id, 10);
-        
+
         let _ = std::fs::remove_dir_all(path);
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn test_storage_fallback_write() {
-        let fs = Arc::new(crate::platform::StdFileSystem);
+        let fs = Arc::new(crate::io::platform::StdFileSystem);
         let path = "test_storage_fallback";
         let _ = std::fs::remove_dir_all(path);
         let storage = Storage::new(path.to_string(), fs);
-        
+
         // Force writer to None
         *storage.writer.lock().unwrap() = None;
         *storage.mmap.lock().unwrap() = None;
-        
+
         let data = EntityData {
             entity_id: 20,
             attributes: crate::Attributes::new(),
@@ -648,16 +702,17 @@ mod tests {
             attributes_blob: crate::Attributes::new(),
         };
         storage.write_entity(&data).unwrap();
+        storage.swap_disk_index();
         let read_data = storage.read_entity(20).unwrap();
         assert_eq!(read_data.entity_id, 20);
-        
+
         let _ = std::fs::remove_dir_all(path);
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn test_storage_rebuild_and_corrupt() {
-        let fs = Arc::new(crate::platform::StdFileSystem);
+        let fs = Arc::new(crate::io::platform::StdFileSystem);
         let path = "test_storage_corrupt";
         let _ = std::fs::remove_dir_all(path);
         std::fs::create_dir_all(path).unwrap();
@@ -672,12 +727,32 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn test_storage_flush_none() {
-        let fs = Arc::new(crate::platform::StdFileSystem);
+        let fs = Arc::new(crate::io::platform::StdFileSystem);
         let path = "test_storage_flush_none";
         let _ = std::fs::remove_dir_all(path);
         let storage = Storage::new(path.to_string(), fs);
         *storage.writer.lock().unwrap() = None;
         assert!(storage.flush().is_ok());
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn test_peek_entity_id_short() {
+        assert!(Storage::peek_entity_id(&[1, 2, 3]).is_none());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_storage_rebuild_truncated_record() {
+        let fs = Arc::new(crate::io::platform::StdFileSystem);
+        let path = "test_storage_trunc";
+        let _ = std::fs::remove_dir_all(path);
+        std::fs::create_dir_all(path).unwrap();
+        let bin_path = format!("{}/entities.bin", path);
+        // Write invalid data (length prefix larger than file)
+        std::fs::write(&bin_path, vec![0xFF, 0x00, 0x00, 0x00, 1]).unwrap();
+        let storage = Storage::new(path.to_string(), fs.clone()); // calls rebuild disk index
+        assert!(storage.read_entity(1).is_err());
         let _ = std::fs::remove_dir_all(path);
     }
 }

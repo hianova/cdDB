@@ -1,7 +1,7 @@
-use alloc::vec::Vec;
-use core::hash::{Hash, Hasher, BuildHasher};
-use core::borrow::Borrow;
 use ahash::RandomState;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::hash::{BuildHasher, Hash};
 
 #[derive(Clone, Debug)]
 pub enum Bucket<K, V> {
@@ -66,7 +66,8 @@ where
     S: BuildHasher,
 {
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        if self.table.is_empty() || (self.len + self.deleted_count + 1) * 10 >= self.table.len() * 7 {
+        if self.table.is_empty() || (self.len + self.deleted_count + 1) * 10 >= self.table.len() * 7
+        {
             let new_cap = ((self.len + 1) * 2).next_power_of_two().max(8);
             self.resize(new_cap);
         }
@@ -74,15 +75,13 @@ where
     }
 
     fn insert_no_resize(&mut self, key: K, value: V) -> Option<V> {
-        let mut s = self.hasher.build_hasher();
-        key.hash(&mut s);
-        let hash = s.finish();
-        
+        let hash = self.hasher.hash_one(&key);
+
         let cap = self.table.len();
         let mask = cap - 1;
         let mut idx = hash as usize & mask;
         let mut first_deleted = None;
-        
+
         loop {
             match &mut self.table[idx] {
                 Bucket::Empty => {
@@ -120,14 +119,13 @@ where
         if self.table.is_empty() {
             return None;
         }
-        let mut s = self.hasher.build_hasher();
-        key.hash(&mut s);
-        let hash = s.finish();
-        
+
+        let hash = self.hasher.hash_one(key);
+
         let cap = self.table.len();
         let mask = cap - 1;
         let mut idx = hash as usize & mask;
-        
+
         loop {
             match &self.table[idx] {
                 Bucket::Empty => return None,
@@ -150,14 +148,13 @@ where
         if self.table.is_empty() {
             return None;
         }
-        let mut s = self.hasher.build_hasher();
-        key.hash(&mut s);
-        let hash = s.finish();
-        
+
+        let hash = self.hasher.hash_one(key);
+
         let cap = self.table.len();
         let mask = cap - 1;
         let mut idx = hash as usize & mask;
-        
+
         let found_idx = loop {
             match &self.table[idx] {
                 Bucket::Empty => return None,
@@ -170,7 +167,7 @@ where
             }
             idx = (idx + 1) & mask;
         };
-        
+
         match &mut self.table[found_idx] {
             Bucket::Occupied(_, v) => Some(v),
             _ => unreachable!(),
@@ -185,14 +182,13 @@ where
         if self.table.is_empty() {
             return None;
         }
-        let mut s = self.hasher.build_hasher();
-        key.hash(&mut s);
-        let hash = s.finish();
-        
+
+        let hash = self.hasher.hash_one(key);
+
         let cap = self.table.len();
         let mask = cap - 1;
         let mut idx = hash as usize & mask;
-        
+
         let found_idx = loop {
             match &self.table[idx] {
                 Bucket::Empty => return None,
@@ -205,7 +201,7 @@ where
             }
             idx = (idx + 1) & mask;
         };
-        
+
         let old = core::mem::replace(&mut self.table[found_idx], Bucket::Deleted);
         self.len -= 1;
         self.deleted_count += 1;
@@ -243,11 +239,11 @@ where
         for _ in 0..new_cap {
             new_table.push(Bucket::Empty);
         }
-        
+
         let old_table = core::mem::replace(&mut self.table, new_table);
         self.len = 0;
         self.deleted_count = 0;
-        
+
         for bucket in old_table {
             if let Bucket::Occupied(k, v) = bucket {
                 self.insert_no_resize(k, v);
@@ -256,11 +252,15 @@ where
     }
 
     pub fn iter(&self) -> Iter<'_, K, V> {
-        Iter { iter: self.table.iter() }
+        Iter {
+            iter: self.table.iter(),
+        }
     }
-    
+
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
-        IterMut { iter: self.table.iter_mut() }
+        IterMut {
+            iter: self.table.iter_mut(),
+        }
     }
 
     pub fn keys(&self) -> Keys<'_, K, V> {
@@ -278,7 +278,7 @@ pub struct Iter<'a, K, V> {
 
 impl<'a, K, V> Iterator for Iter<'a, K, V> {
     type Item = (&'a K, &'a V);
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.iter.next() {
@@ -296,7 +296,7 @@ pub struct IterMut<'a, K, V> {
 
 impl<'a, K, V> Iterator for IterMut<'a, K, V> {
     type Item = (&'a K, &'a mut V);
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.iter.next() {
@@ -337,7 +337,7 @@ where
 {
     type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
@@ -350,7 +350,7 @@ where
 {
     type Item = (&'a K, &'a mut V);
     type IntoIter = IterMut<'a, K, V>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         self.iter_mut()
     }
@@ -362,7 +362,7 @@ pub struct IntoIter<K, V> {
 
 impl<K, V> Iterator for IntoIter<K, V> {
     type Item = (K, V);
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.iter.next() {
@@ -377,9 +377,11 @@ impl<K, V> Iterator for IntoIter<K, V> {
 impl<K, V, S> IntoIterator for AHashMap<K, V, S> {
     type Item = (K, V);
     type IntoIter = IntoIter<K, V>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
-        IntoIter { iter: self.table.into_iter() }
+        IntoIter {
+            iter: self.table.into_iter(),
+        }
     }
 }
 
@@ -399,10 +401,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
+    use alloc::format;
     use alloc::string::String;
     use alloc::string::ToString;
-    use alloc::format;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     #[test]
@@ -412,11 +414,11 @@ mod tests {
         assert_eq!(map.len(), 0);
 
         // Test with_capacity
-        let mut map_cap: AHashMap<String, i32> = AHashMap::with_capacity(16);
+        let map_cap: AHashMap<String, i32> = AHashMap::with_capacity(16);
         assert!(map_cap.is_empty());
 
         // Test with_hasher
-        let mut map_hasher: AHashMap<String, i32> = AHashMap::with_hasher(RandomState::new());
+        let map_hasher: AHashMap<String, i32> = AHashMap::with_hasher(RandomState::new());
         assert!(map_hasher.is_empty());
 
         // Test insert and get
@@ -509,24 +511,24 @@ mod tests {
     #[test]
     fn test_ahashmap_deleted_buckets() {
         let mut map: AHashMap<i32, i32> = AHashMap::default();
-        
+
         // Insert many to force collisions and probing
         for i in 0..1000 {
             map.insert(i, i * 10);
         }
-        
+
         // Remove many to create many Bucket::Deleted
         for i in 0..1000 {
             if i % 2 == 0 {
                 assert_eq!(map.remove(&i), Some(i * 10));
             }
         }
-        
+
         // Insert new ones to reuse Bucket::Deleted and trigger probing over them
         for i in 1000..1500 {
             map.insert(i, i * 10);
         }
-        
+
         // Get and Get_Mut over Bucket::Deleted
         for i in 0..1000 {
             if i % 2 != 0 {
@@ -539,7 +541,7 @@ mod tests {
                 assert!(!map.contains_key(&i));
             }
         }
-        
+
         // Remove passing over Bucket::Deleted
         for i in 0..1000 {
             if i % 2 != 0 {
@@ -548,4 +550,3 @@ mod tests {
         }
     }
 }
-

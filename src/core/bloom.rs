@@ -1,9 +1,7 @@
-use core::hash::Hash;
 use ahash::RandomState;
+use core::hash::Hash;
 
-use crate::sync::atomic::{AtomicUsize, Ordering};
-
-
+use crate::core::atomic::{AtomicUsize, Ordering};
 
 /// A lock-free, constant-generic Bloom filter backed by AHash and four hash probes.
 ///
@@ -221,9 +219,17 @@ mod tests {
     fn test_bloom_filter() {
         let bloom = SimpleBloom::<1024>::new();
         let entity_id = 42usize;
-        
-        assert_eq!(bloom.contains(&entity_id), false);
+
+        assert!(!bloom.contains(&entity_id));
+        assert_eq!(bloom.count_set_bits(), 0);
+        assert_eq!(bloom.total_bits(), 1024 * 64);
+
         bloom.insert(&entity_id);
-        assert_eq!(bloom.contains(&entity_id), true);
+        assert!(bloom.contains(&entity_id));
+        assert!(bloom.count_set_bits() > 0 && bloom.count_set_bits() <= 4);
+
+        bloom.clear();
+        assert_eq!(bloom.count_set_bits(), 0);
+        assert!(!bloom.contains(&entity_id));
     }
 }

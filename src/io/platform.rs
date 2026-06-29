@@ -1,7 +1,6 @@
-
-use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 
 /// Platform Abstraction Layer (PAL) for all file I/O operations.
 ///
@@ -146,20 +145,27 @@ impl FileSystem for StdFileSystem {
     fn write(&self, path: &str, data: &[u8]) -> Result<(), String> {
         use std::io::Write;
         let mut file = std::fs::File::create(path).map_err(|e: std::io::Error| e.to_string())?;
-        file.write_all(data).map_err(|e: std::io::Error| e.to_string())
+        file.write_all(data)
+            .map_err(|e: std::io::Error| e.to_string())
     }
     fn read(&self, path: &str) -> Result<Vec<u8>, String> {
         std::fs::read(path).map_err(|e: std::io::Error| e.to_string())
     }
     fn append(&self, path: &str, data: &[u8]) -> Result<(), String> {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e: std::io::Error| e.to_string())?;
-        file.write_all(data).map_err(|e: std::io::Error| e.to_string())
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e: std::io::Error| e.to_string())?;
+        file.write_all(data)
+            .map_err(|e: std::io::Error| e.to_string())
     }
     fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
         use std::io::{Read, Seek};
         let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        file.seek(std::io::SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .map_err(|e| e.to_string())?;
         let mut buf = alloc::vec![0; len];
         file.read_exact(&mut buf).map_err(|e| e.to_string())?;
         Ok(buf)
@@ -180,9 +186,10 @@ impl FileSystem for StdFileSystem {
         let mut names = Vec::new();
         for entry in entries {
             if let Ok(entry) = entry
-                && let Ok(name) = entry.file_name().into_string() {
-                    names.push(name);
-                }
+                && let Ok(name) = entry.file_name().into_string()
+            {
+                names.push(name);
+            }
         }
         Ok(names)
     }
@@ -199,7 +206,7 @@ pub struct StdExecutor;
 /// Abstracts blocking and non-blocking receive from a command queue.
 ///
 /// `MessageQueue` provides a uniform interface for consuming
-/// [`PartitionCommand`][crate::commands::PartitionCommand] values regardless of
+/// [`PartitionCommand`][crate::core::commands::PartitionCommand] values regardless of
 /// the underlying queue implementation. Callers can choose between a blocking
 /// receive ([`recv`][MessageQueue::recv]) that parks the thread until a command
 /// is available, or a non-blocking attempt ([`try_recv`][MessageQueue::try_recv])
@@ -207,7 +214,7 @@ pub struct StdExecutor;
 ///
 /// Implementations must be both `Send` and `Sync`.
 pub trait MessageQueue: Send + Sync {
-    /// Blocks the current thread until a [`PartitionCommand`][crate::commands::PartitionCommand]
+    /// Blocks the current thread until a [`PartitionCommand`][crate::core::commands::PartitionCommand]
     /// is available, then returns it.
     ///
     /// Internally uses a spin-then-yield backoff (see [`Backoff`]) to avoid
@@ -216,9 +223,9 @@ pub trait MessageQueue: Send + Sync {
     /// # Errors
     ///
     /// Returns an error string if the queue is in an unrecoverable error state.
-    fn recv(&self) -> Result<crate::commands::PartitionCommand, String>;
+    fn recv(&self) -> Result<crate::core::commands::PartitionCommand, String>;
 
-    /// Attempts to receive a [`PartitionCommand`][crate::commands::PartitionCommand]
+    /// Attempts to receive a [`PartitionCommand`][crate::core::commands::PartitionCommand]
     /// without blocking.
     ///
     /// Returns immediately: `Ok(cmd)` if a command was queued, or an error if
@@ -227,10 +234,10 @@ pub trait MessageQueue: Send + Sync {
     /// # Errors
     ///
     /// Returns `Err("Empty")` when no command is currently available.
-    fn try_recv(&self) -> Result<crate::commands::PartitionCommand, String>;
+    fn try_recv(&self) -> Result<crate::core::commands::PartitionCommand, String>;
 }
 
-/// Standard-library backed [`MessageQueue`] that wraps a [`BoundedQueue`][crate::queue::BoundedQueue].
+/// Standard-library backed [`MessageQueue`] that wraps a [`BoundedQueue`][crate::core::queue::BoundedQueue].
 ///
 /// Uses a shared [`Arc`][alloc::sync::Arc] so the same queue can be owned by
 /// both a [`StdMessageSender`] (producer side) and a `StdMessageQueue`
@@ -239,7 +246,8 @@ pub trait MessageQueue: Send + Sync {
 #[cfg(feature = "std")]
 pub struct StdMessageQueue {
     /// The shared bounded queue from which commands are consumed.
-    pub rx: alloc::sync::Arc<crate::queue::BoundedQueue<crate::commands::PartitionCommand>>,
+    pub rx:
+        alloc::sync::Arc<crate::core::queue::BoundedQueue<crate::core::commands::PartitionCommand>>,
 }
 
 /// A simple spin-then-yield backoff helper for tight polling loops.
@@ -303,7 +311,7 @@ impl Backoff {
 
 #[cfg(feature = "std")]
 impl MessageQueue for StdMessageQueue {
-    fn recv(&self) -> Result<crate::commands::PartitionCommand, String> {
+    fn recv(&self) -> Result<crate::core::commands::PartitionCommand, String> {
         let mut backoff = Backoff::new();
         loop {
             if let Some(cmd) = self.rx.pop() {
@@ -316,7 +324,7 @@ impl MessageQueue for StdMessageQueue {
             }
         }
     }
-    fn try_recv(&self) -> Result<crate::commands::PartitionCommand, String> {
+    fn try_recv(&self) -> Result<crate::core::commands::PartitionCommand, String> {
         self.rx.pop().ok_or_else(|| "Empty".to_string())
     }
 }
@@ -353,7 +361,7 @@ pub trait ThreadLocalProvider<T>: Send + Sync {
     fn set(&self, val: T);
 }
 
-/// Abstracts sending [`PartitionCommand`][crate::commands::PartitionCommand]
+/// Abstracts sending [`PartitionCommand`][crate::core::commands::PartitionCommand]
 /// values into a command queue.
 ///
 /// `MessageSender` is the producer-side counterpart to [`MessageQueue`]. It
@@ -374,11 +382,11 @@ pub trait MessageSender: Send + Sync {
     ///
     /// Returns an error string if the command could not be sent due to an
     /// unrecoverable queue error.
-    fn send(&self, cmd: crate::commands::PartitionCommand) -> Result<(), String>;
+    fn send(&self, cmd: crate::core::commands::PartitionCommand) -> Result<(), String>;
 }
 
 /// Standard-library backed [`MessageSender`] that writes into a shared
-/// [`BoundedQueue`][crate::queue::BoundedQueue].
+/// [`BoundedQueue`][crate::core::queue::BoundedQueue].
 ///
 /// Pairs with [`StdMessageQueue`]: both hold an [`Arc`][alloc::sync::Arc] to
 /// the same underlying queue, forming a single-producer / single-consumer
@@ -388,12 +396,13 @@ pub trait MessageSender: Send + Sync {
 #[allow(dead_code)]
 pub struct StdMessageSender {
     /// The shared bounded queue into which commands are pushed.
-    pub tx: alloc::sync::Arc<crate::queue::BoundedQueue<crate::commands::PartitionCommand>>,
+    pub tx:
+        alloc::sync::Arc<crate::core::queue::BoundedQueue<crate::core::commands::PartitionCommand>>,
 }
 
 #[cfg(feature = "std")]
 impl MessageSender for StdMessageSender {
-    fn send(&self, mut cmd: crate::commands::PartitionCommand) -> Result<(), String> {
+    fn send(&self, mut cmd: crate::core::commands::PartitionCommand) -> Result<(), String> {
         let mut backoff = Backoff::new();
         loop {
             match self.tx.push(cmd) {
@@ -443,18 +452,18 @@ mod tests {
     #[test]
     fn test_std_executor_and_queue() {
         let exec = StdExecutor;
-        let q = alloc::sync::Arc::new(crate::queue::BoundedQueue::new(16));
+        let q = alloc::sync::Arc::new(crate::core::queue::BoundedQueue::new(16));
         let mq = StdMessageQueue { rx: q.clone() };
         let ms = StdMessageSender { tx: q };
-        
-        let cmd = crate::commands::PartitionCommand::Shutdown;
+
+        let cmd = crate::core::commands::PartitionCommand::Shutdown;
         ms.send(cmd).unwrap();
         let recv_cmd = mq.recv().unwrap();
         match recv_cmd {
-            crate::commands::PartitionCommand::Shutdown => {}
+            crate::core::commands::PartitionCommand::Shutdown => {}
             _ => panic!("Expected Shutdown"),
         }
-        
+
         exec.spawn_task(alloc::boxed::Box::new(|| {
             let _ = 1 + 1;
         }));
@@ -475,22 +484,36 @@ mod tests {
         use alloc::vec;
         struct DummyFS;
         impl FileSystem for DummyFS {
-            fn write(&self, _path: &str, _data: &[u8]) -> Result<(), String> { Ok(()) }
-            fn read(&self, path: &str) -> Result<Vec<u8>, String> {
-                if path == "ok" { Ok(vec![1, 2, 3]) } else { Err("err".to_string()) }
+            fn write(&self, _path: &str, _data: &[u8]) -> Result<(), String> {
+                Ok(())
             }
-            fn append(&self, _path: &str, _data: &[u8]) -> Result<(), String> { Ok(()) }
-            fn exists(&self, _path: &str) -> bool { false }
-            fn create_dir_all(&self, _path: &str) -> Result<(), String> { Ok(()) }
-            fn read_dir(&self, _path: &str) -> Result<Vec<String>, String> { Ok(vec![]) }
+            fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+                if path == "ok" {
+                    Ok(vec![1, 2, 3])
+                } else {
+                    Err("err".to_string())
+                }
+            }
+            fn append(&self, _path: &str, _data: &[u8]) -> Result<(), String> {
+                Ok(())
+            }
+            fn exists(&self, _path: &str) -> bool {
+                false
+            }
+            fn create_dir_all(&self, _path: &str) -> Result<(), String> {
+                Ok(())
+            }
+            fn read_dir(&self, _path: &str) -> Result<Vec<String>, String> {
+                Ok(vec![])
+            }
         }
-        
+
         let fs = DummyFS;
         assert_eq!(fs.read_range("ok", 0, 2).unwrap(), vec![1, 2]);
         assert!(fs.read_range("ok", 0, 5).is_err());
         assert_eq!(fs.file_size("ok").unwrap(), 3);
         assert!(fs.file_size("err").is_err());
-        
+
         // Cover dummy methods
         assert!(fs.write("test", &[]).is_ok());
         assert!(fs.append("test", &[]).is_ok());
@@ -502,20 +525,23 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn test_std_message_sender_backoff() {
-        let q = alloc::sync::Arc::new(crate::queue::BoundedQueue::new(1));
+        let q = alloc::sync::Arc::new(crate::core::queue::BoundedQueue::new(1));
         let ms = StdMessageSender { tx: q.clone() };
-        
-        ms.tx.push(crate::commands::PartitionCommand::Shutdown).unwrap();
-        
+
+        ms.tx
+            .push(crate::core::commands::PartitionCommand::Shutdown)
+            .unwrap();
+
         let q_clone = q.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
             let _ = q_clone.pop();
         });
-        
-        ms.send(crate::commands::PartitionCommand::Shutdown).unwrap();
+
+        ms.send(crate::core::commands::PartitionCommand::Shutdown)
+            .unwrap();
     }
-    
+
     #[cfg(feature = "std")]
     #[test]
     fn test_std_filesystem_errors() {

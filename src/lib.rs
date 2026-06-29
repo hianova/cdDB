@@ -90,133 +90,86 @@
 //! });
 //! ```
 
-
 #![no_std]
 #![allow(non_snake_case)]
 extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
-pub mod platform;
-pub mod sync;
-pub mod qsbr;
-mod storage;
-pub mod unsafe_core {
-    pub use crate::sync::rcu::*;
-    
-    #[cfg(not(feature = "std"))]
-    pub mod no_std_sync {
-        pub use crate::sync::no_std::Mutex;
-    }
-}
-pub mod queue;
-pub mod column;
-pub mod commands;
-pub mod facade;
-mod partition;
-mod query;
-mod dispatcher;
-mod bloom;
-pub mod wal;
+pub mod core;
+
+#[cfg(feature = "std")]
+pub mod engine;
+pub mod io;
+
+// Re-export public types for API compatibility
+pub use core::column::{ColumnArray, Columns};
+pub use core::commands::{
+    Attributes, ITOpsIngest, ITOpsRecord, LogLevel, PartitionCommand, WriteCommand,
+};
+pub use core::qsbr::{QsbrManager, WorkerState};
+pub use core::query::{AggregateOp, CdDbQuery, Query, QueryNode, QueryResult, QuerySession};
+
+#[cfg(feature = "std")]
+pub use engine::dispatcher::{CdDBDispatcher, UserWriter};
+#[cfg(feature = "std")]
+pub use engine::partition::Partition;
+
+pub use core::column::MultiVectorPointer;
+pub use core::query::PartitionRoute;
+#[cfg(feature = "std")]
+pub use engine::facade::{CdDBBlobStore, CdDBPartition, CdDBStore, CdDBStrStore};
+
+pub use io::platform::FileSystem;
+pub use io::storage::{EntityData, Storage};
+pub use io::wal::{
+    DurabilityMode, FlushConfig, FlushConfigBuilder, NoopWal, StdWal, WalMode, WalProvider,
+};
+
+pub use crate::core::AHashMap;
+
 #[cfg(not(feature = "dualcache-ff"))]
 mod dualcache_stub {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum DaemonStatus {
-        NotStarted = 0,
-        Running = 1,
-        ShuttingDown = 2,
-        Stopped = 3,
-        Panicked = 4,
-    }
-
-    ///
-    /// Note: The real `DualCacheFF` (when enabled) uses **asynchronous admission**. 
-    /// Calling `insert()` queues the item, and an immediate `get()` will return `None` 
-    /// until the background daemon processes the queue. This is intentional.
     #[derive(Clone, Debug)]
-    pub struct DualCacheFF<K, V> {
-        _marker: core::marker::PhantomData<(K, V)>,
+    pub struct DualCacheFF<
+        K,
+        V,
+        P,
+        const C2: usize,
+        const C1: usize,
+        const C0: usize,
+        const TC: usize,
+    > {
+        _marker: core::marker::PhantomData<(K, V, P)>,
     }
 
-    unsafe impl<K, V> Send for DualCacheFF<K, V> {}
-    unsafe impl<K, V> Sync for DualCacheFF<K, V> {}
-
-    #[derive(Clone, Debug)]
-    pub struct Config;
-
-    impl Config {
-        pub fn with_memory_budget(_budget: usize, _percent: usize) -> Self {
-            Self
-        }
+    unsafe impl<K, V, P, const C2: usize, const C1: usize, const C0: usize, const TC: usize> Send
+        for DualCacheFF<K, V, P, C2, C1, C0, TC>
+    {
+    }
+    unsafe impl<K, V, P, const C2: usize, const C1: usize, const C0: usize, const TC: usize> Sync
+        for DualCacheFF<K, V, P, C2, C1, C0, TC>
+    {
     }
 
-    impl<K, V> DualCacheFF<K, V> {
-        pub fn new(_config: Config) -> Self {
+    impl<K, V, P, const C2: usize, const C1: usize, const C0: usize, const TC: usize>
+        DualCacheFF<K, V, P, C2, C1, C0, TC>
+    {
+        pub fn new(_config: ()) -> Self {
             Self {
                 _marker: core::marker::PhantomData,
             }
         }
-
-        pub fn new_headless(_config: Config) -> (Self, ()) {
-            (Self::new(_config), ())
-        }
-
-        /// Stub `insert`: Does nothing.
-        /// (In the real `DualCacheFF`, this asynchronously queues the item).
-        pub fn insert(&self, _key: K, _value: V) {}
-        pub fn remove(&self, _key: &K) -> Option<V> {
-            None
-        }
-        pub fn get(&self, _key: &K) -> Option<V> {
-            None
-        }
-
-        pub fn daemon_health(&self) -> DaemonStatus {
-            DaemonStatus::Stopped
-        }
-
-        pub fn shutdown_gracefully(&self, _timeout: Option<core::time::Duration>) {}
-
-        pub fn suspend(&self) {}
-
-        pub fn resume(&self) {}
     }
 }
 
-// Re-export public types for API compatibility
-pub use column::{Columns, ColumnArray};
-pub use commands::{Attributes, WriteCommand, PartitionCommand};
-pub use partition::{MultiVectorPointer, Partition};
-pub use query::{QueryNode, AggregateOp, CdDbQuery, QueryResult, Query, QuerySession};
-pub use dispatcher::{CdDBDispatcher, PartitionRoute};
-#[cfg(feature = "std")]
-pub use dispatcher::UserWriter;
-pub use qsbr::{QsbrManager, WorkerState};
-pub use storage::{Storage, EntityData};
-pub use commands::{ITOpsRecord, LogLevel, ITOpsIngest};
-pub use wal::{WalProvider, StdWal, NoopWal, WalMode, DurabilityMode, FlushConfig, FlushConfigBuilder};
-pub use platform::FileSystem;
-
 #[cfg(feature = "dualcache-ff")]
 #[cfg(feature = "std")]
-pub use dualcache_ff::{DualCacheFF, Config, daemon};
+pub use dualcache_ff::DualCacheFF;
 
 #[cfg(feature = "dualcache-ff")]
 #[cfg(not(feature = "std"))]
-pub use dualcache_ff::{StaticDualCache as DualCacheFF, Config};
+pub use dualcache_ff::StaticDualCache as DualCacheFF;
 
 #[cfg(not(feature = "dualcache-ff"))]
-pub use dualcache_stub::{DualCacheFF, Config};
-
-#[cfg(feature = "dualcache-ff")]
-pub use dualcache_ff::DaemonStatus;
-
-#[cfg(not(feature = "dualcache-ff"))]
-pub use dualcache_stub::DaemonStatus;
-
-pub use facade::CdDBStore;
-#[cfg(feature = "std")]
-pub use facade::{CdDBStrStore, CdDBBlobStore, CdDBPartition};
-pub use facade::CdDBManagedCache;
-
-pub use crate::sync::AHashMap;
+pub use dualcache_stub::DualCacheFF;

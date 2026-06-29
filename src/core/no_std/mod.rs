@@ -1,6 +1,6 @@
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 pub struct Mutex<T: ?Sized> {
     locked: AtomicBool,
@@ -25,7 +25,11 @@ impl<T> Mutex<T> {
 
 impl<T: ?Sized> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<'_, T> {
-        while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             core::hint::spin_loop();
         }
         MutexGuard { mutex: self }
@@ -52,7 +56,7 @@ impl<T: ?Sized> Drop for MutexGuard<'_, T> {
 }
 
 pub mod atomic {
-    pub use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
     #[cfg(target_has_atomic = "64")]
     pub use core::sync::atomic::AtomicU64;
+    pub use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 }

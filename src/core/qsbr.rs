@@ -1,7 +1,7 @@
-use crate::sync::atomic::{AtomicUsize, AtomicPtr, Ordering};
+use crate::core::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use crate::core::rcu::GarbageEntry;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::unsafe_core::GarbageEntry;
 
 /// A singly-linked list node that wraps a single [`WorkerState`].
 ///
@@ -187,12 +187,12 @@ impl QsbrManager {
     /// - No other live reference to `*ptr` exists or will be created after
     ///   this call.
     pub fn defer_free<T>(&mut self, ptr: *mut T) {
-        if ptr.is_null() { return; }
+        if ptr.is_null() {
+            return;
+        }
 
-        self.garbage.push(GarbageEntry::new(
-            ptr,
-            GLOBAL_EPOCH.load(Ordering::Relaxed),
-        ));
+        self.garbage
+            .push(GarbageEntry::new(ptr, GLOBAL_EPOCH.load(Ordering::Relaxed)));
     }
 
     /// Advances the global epoch and reclaims garbage that is no longer
@@ -217,7 +217,7 @@ impl QsbrManager {
     ///
     /// # Safety
     ///
-    /// This method calls [`crate::unsafe_core::load_node`] internally, which
+    /// This method calls [`crate::core::rcu::load_node`] internally, which
     /// dereferences raw pointers. The caller must ensure the `workers` list is
     /// always in a consistent, pointer-valid state while `maintenance` runs.
     pub fn maintenance(&mut self) {
@@ -228,7 +228,7 @@ impl QsbrManager {
         let mut min_epoch = current_global;
 
         let mut curr_ptr = self.workers.load(Ordering::Acquire);
-        while let Some(node) = unsafe { crate::unsafe_core::load_node(curr_ptr) } {
+        while let Some(node) = unsafe { crate::core::rcu::load_node(curr_ptr) } {
             let epoch = node.worker.local_epoch.load(Ordering::Acquire);
             if epoch != 0 && epoch < min_epoch {
                 min_epoch = epoch;

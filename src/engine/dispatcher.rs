@@ -1,30 +1,30 @@
 use crate::AHashMap;
+use crate::core::atomic::AtomicPtr;
+use crate::core::query::{PartitionRoute, Query, QueryNode, QueryResult};
+use alloc::format;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use alloc::string::String;
-use alloc::format;
-use crate::query::{Query, QueryNode, QueryResult};
-use crate::sync::atomic::AtomicPtr;
 
 #[cfg(feature = "std")]
-use crate::queue::BoundedQueue;
+use crate::core::queue::BoundedQueue;
 
-use crate::bloom::SimpleBloom;
-use crate::{DualCacheFF, Config};
+use crate::DualCacheFF;
+use crate::core::bloom::SimpleBloom;
 
-use crate::column::{Columns, ColumnArray};
-use crate::partition::MultiVectorPointer;
+use crate::core::column::MultiVectorPointer;
+use crate::core::column::{ColumnArray, Columns};
 #[cfg(feature = "std")]
-use crate::partition::Partition;
-use crate::qsbr::{WorkerState, WorkerNode};
-use crate::storage::Storage;
-use crate::unsafe_core::new_atomic_ptr;
-use crate::platform::{FileSystem, Executor};
-use crate::wal::{WalProvider, NoopWal};
+use crate::core::commands::{PartitionCommand, WriteCommand};
+use crate::core::qsbr::{WorkerNode, WorkerState};
+use crate::core::rcu::new_atomic_ptr;
 #[cfg(feature = "std")]
-use crate::wal::StdWal;
+use crate::engine::partition::Partition;
+use crate::io::platform::{Executor, FileSystem};
+use crate::io::storage::Storage;
 #[cfg(feature = "std")]
-use crate::commands::{PartitionCommand, WriteCommand};
+use crate::io::wal::StdWal;
+use crate::io::wal::{NoopWal, WalProvider};
 /// A metrics snapshot for a single partition, captured at a point-in-time
 /// without holding any locks.
 ///
@@ -85,13 +85,9 @@ pub struct DbMetrics {
 ///
 /// `CdDBDispatcher<N>` is responsible for:
 /// - Maintaining a **route table** that maps partition names to their
-///   [`PartitionRoute<N>`] contexts.
-/// - Spawning and managing per-partition background worker threads (in `std`
-///   builds) that process write commands through a lock-free bounded queue.
-/// - Providing a unified read API ([`execute_batch`](Self::execute_batch),
-///   [`get_route`](Self::get_route)) under a single QSBR pin per call batch.
-/// - Exposing operational knobs: cache sync, pre-warming, sleep/wake, and
-///   lock-free metrics.
+/// [`CdDBDispatcher`] acts as the front door for all read and write requests,
+/// delegating work to individual partitions using a robust epoch-based routing
+/// table.
 ///
 /// # Type parameter `N`
 ///
@@ -138,7 +134,17 @@ pub struct CdDBDispatcher<const N: usize> {
     /// Cache keys are `(partition_id, entity_id)` tuples, ensuring isolation
     /// between partitions while allowing the eviction policy to see the full
     /// cross-partition access distribution.
-    pub global_cache: Arc<DualCacheFF<(u32, usize), ()>>,
+    pub global_cache: Arc<
+        DualCacheFF<
+            (u32, usize),
+            (),
+            dualcache_ff::core::DefaultExponentialPolicy,
+            64,
+            4096,
+            262144,
+            266304,
+        >,
+    >,
     /// Monotonically increasing counter used to assign a unique `u32` ID to
     /// each registered partition. Incremented once per
     /// [`register_partition_with_wal_provider`](Self::register_partition_with_wal_provider)
@@ -188,10 +194,8 @@ impl<const N: usize> CdDBDispatcher<N> {
         executor: Arc<dyn Executor>,
     ) -> Self {
         #[cfg(feature = "dualcache-ff")]
-        let cache_config = Config::with_memory_budget(100, 60);
-
         #[cfg(feature = "dualcache-ff")]
-        let global_cache = DualCacheFF::new(cache_config);
+        let global_cache = DualCacheFF::new(32, 1024);
 
         #[cfg(not(feature = "dualcache-ff"))]
         let global_cache = DualCacheFF::new(Config);
@@ -199,7 +203,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         Self {
             route_table: AHashMap::default(),
             base_path,
-            workers: Arc::new(crate::sync::atomic::AtomicPtr::new(core::ptr::null_mut())),
+            workers: Arc::new(crate::core::atomic::AtomicPtr::new(core::ptr::null_mut())),
             fs,
             executor,
             global_cache: Arc::new(global_cache),
@@ -232,8 +236,8 @@ impl<const N: usize> CdDBDispatcher<N> {
     pub fn new_std(base_path: Option<String>) -> Self {
         Self::new(
             base_path,
-            Arc::new(crate::platform::StdFileSystem),
-            Arc::new(crate::platform::StdExecutor),
+            Arc::new(crate::io::platform::StdFileSystem),
+            Arc::new(crate::io::platform::StdExecutor),
         )
     }
 
@@ -257,7 +261,7 @@ impl<const N: usize> CdDBDispatcher<N> {
     /// A [`UserWriter`] bound to the newly created partition's command queue.
     #[cfg(feature = "std")]
     pub fn register_partition(&mut self, path: String) -> UserWriter {
-        self.register_partition_with_wal(path, None, crate::wal::WalMode::Sync)
+        self.register_partition_with_wal(path, None, crate::io::wal::WalMode::Sync)
     }
 
     /// Register a new partition with an explicit memory budget hint.
@@ -282,7 +286,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         path: String,
         _budget_bytes: usize,
     ) -> UserWriter {
-        self.register_partition_with_wal(path, None, crate::wal::WalMode::Sync)
+        self.register_partition_with_wal(path, None, crate::io::wal::WalMode::Sync)
     }
 
     /// Register a new partition, specifying an optional WAL file path and
@@ -308,7 +312,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         &mut self,
         path: String,
         wal_path: Option<String>,
-        wal_mode: crate::wal::WalMode,
+        wal_mode: crate::io::wal::WalMode,
     ) -> UserWriter {
         let wal: Arc<dyn WalProvider> = if let Some(p) = wal_path {
             Arc::new(StdWal::new(p, self.fs.clone(), wal_mode))
@@ -351,11 +355,12 @@ impl<const N: usize> CdDBDispatcher<N> {
     ) -> UserWriter {
         let queue = Arc::new(BoundedQueue::new(262144));
         let writer_tx_out = queue.clone();
-        
+
         let partition_id = self.next_partition_id;
         self.next_partition_id += 1;
-        let (storage_path, shared_pointers, bloom, columns, workers) = self.init_partition_state(&path);
-        
+        let (storage_path, shared_pointers, bloom, columns, workers) =
+            self.init_partition_state(&path);
+
         let route = Arc::new(PartitionRoute {
             name: path.clone(),
             partition_id,
@@ -368,9 +373,9 @@ impl<const N: usize> CdDBDispatcher<N> {
             workers: Arc::clone(&workers),
             wal: Arc::clone(&wal),
         });
-        
+
         self.route_table.insert(path.clone(), route);
- 
+
         self.spawn_partition_thread(
             queue,
             columns,
@@ -382,7 +387,7 @@ impl<const N: usize> CdDBDispatcher<N> {
             partition_id,
             self.global_cache.clone(),
         );
- 
+
         UserWriter(writer_tx_out)
     }
 
@@ -410,13 +415,14 @@ impl<const N: usize> CdDBDispatcher<N> {
     pub fn register_partition_no_std(
         &mut self,
         path: String,
-        writer_tx: Arc<dyn crate::platform::MessageSender>,
-        _writer_rx: alloc::boxed::Box<dyn crate::platform::MessageQueue>,
+        writer_tx: Arc<dyn crate::io::platform::MessageSender>,
+        _writer_rx: alloc::boxed::Box<dyn crate::io::platform::MessageQueue>,
     ) {
         let partition_id = self.next_partition_id;
         self.next_partition_id += 1;
-        let (storage_path, shared_pointers, bloom, columns, workers) = self.init_partition_state(&path);
-        
+        let (storage_path, shared_pointers, bloom, columns, workers) =
+            self.init_partition_state(&path);
+
         let route = Arc::new(PartitionRoute {
             name: path.clone(),
             partition_id,
@@ -429,13 +435,22 @@ impl<const N: usize> CdDBDispatcher<N> {
             workers: Arc::clone(&workers),
             wal: Arc::new(NoopWal),
         });
-        
+
         self.route_table.insert(path, route);
-        
+
         // In no_std, the user must manage the thread/loop for the Partition
     }
 
-    fn init_partition_state(&self, path: &str) -> (String, Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>, Arc<AtomicPtr<SimpleBloom<N>>>, Arc<AtomicPtr<Columns<N>>>, Arc<AtomicPtr<WorkerNode>>) {
+    fn init_partition_state(
+        &self,
+        path: &str,
+    ) -> (
+        String,
+        Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
+        Arc<AtomicPtr<SimpleBloom<N>>>,
+        Arc<AtomicPtr<Columns<N>>>,
+        Arc<AtomicPtr<WorkerNode>>,
+    ) {
         let storage_path = self
             .base_path
             .as_ref()
@@ -447,8 +462,8 @@ impl<const N: usize> CdDBDispatcher<N> {
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<N>::new()));
         let columns = Arc::new(new_atomic_ptr(Columns::<N>::new()));
-        let workers = Arc::new(crate::sync::atomic::AtomicPtr::new(core::ptr::null_mut()));
-        
+        let workers = Arc::new(crate::core::atomic::AtomicPtr::new(core::ptr::null_mut()));
+
         (storage_path, shared_pointers, bloom, columns, workers)
     }
 
@@ -463,14 +478,24 @@ impl<const N: usize> CdDBDispatcher<N> {
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
         bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
         partition_id: u32,
-        hot_index: Arc<DualCacheFF<(u32, usize), ()>>,
+        hot_index: Arc<
+            DualCacheFF<
+                (u32, usize),
+                (),
+                dualcache_ff::core::DefaultExponentialPolicy,
+                64,
+                4096,
+                262144,
+                266304,
+            >,
+        >,
     ) {
         let fs_rt = self.fs.clone();
         let wal_rt = wal.clone();
-        
+
         self.executor.spawn_task(alloc::boxed::Box::new(move || {
             let mut partition = Partition::new(
-                alloc::boxed::Box::new(crate::platform::StdMessageQueue { rx }),
+                alloc::boxed::Box::new(crate::io::platform::StdMessageQueue { rx }),
                 columns,
                 wal_rt.clone(),
                 workers,
@@ -493,10 +518,10 @@ impl<const N: usize> CdDBDispatcher<N> {
 
     /// Exposes a high-level `CdDBPartition` handle wrapping queries and writes.
     #[cfg(feature = "std")]
-    pub fn get_partition(&self, name: &str) -> Option<crate::facade::CdDBPartition<'_, N>> {
+    pub fn get_partition(&self, name: &str) -> Option<crate::engine::facade::CdDBPartition<'_, N>> {
         let route = self.get_route(name)?;
         let writer = UserWriter(route.writer_tx.clone());
-        Some(crate::facade::CdDBPartition {
+        Some(crate::engine::facade::CdDBPartition {
             name: name.into(),
             writer,
             dispatcher: self,
@@ -511,12 +536,8 @@ impl<const N: usize> CdDBDispatcher<N> {
     /// the caller (e.g. a TCP stream handler parsing a Redis pipeline) hands
     /// `N` commands as an array and pays exactly **one** QSBR enter/leave.
     #[cfg(feature = "std")]
-    pub fn execute_batch<'b, F>(
-        &self,
-        partition: &str,
-        nodes: &[QueryNode<'b>],
-        mut cb: F,
-    ) where
+    pub fn execute_batch<'b, F>(&self, partition: &str, nodes: &[QueryNode<'b>], mut cb: F)
+    where
         F: FnMut(QueryResult),
     {
         if let Some(route) = self.route_table.get(partition) {
@@ -563,7 +584,6 @@ impl<const N: usize> CdDBDispatcher<N> {
         R: Send + 'static,
     {
         if let Some(route) = self.route_table.get(&partition).cloned() {
-            
             tokio::task::spawn_blocking(move || {
                 let q = Query::new(&route);
                 let mut last_res = None;
@@ -571,7 +591,9 @@ impl<const N: usize> CdDBDispatcher<N> {
                     last_res = Some(cb(res));
                 });
                 last_res
-            }).await.unwrap()
+            })
+            .await
+            .unwrap()
         } else {
             None
         }
@@ -589,16 +611,16 @@ impl<const N: usize> CdDBDispatcher<N> {
     /// global cache statistics.
     pub fn metrics(&self) -> DbMetrics {
         let is_sleeping = self.is_sleeping();
-        
+
         let mut partitions = Vec::with_capacity(self.route_table.len());
         for (name, route) in self.route_table.iter() {
-            let bloom = crate::unsafe_core::load_ref(&route.bloom_filter);
+            let bloom = crate::core::rcu::load_ref(&route.bloom_filter);
             let total = bloom.total_bits() as f32;
             let set = bloom.count_set_bits() as f32;
             let saturation = if total > 0.0 { set / total } else { 0.0 };
-            
-            let shared = crate::unsafe_core::load_ref(&route.shared_pointers);
-            
+
+            let shared = crate::core::rcu::load_ref(&route.shared_pointers);
+
             partitions.push(PartitionMetrics {
                 name: name.clone(),
                 partition_id: route.partition_id,
@@ -608,38 +630,37 @@ impl<const N: usize> CdDBDispatcher<N> {
         }
 
         #[cfg(feature = "dualcache-ff")]
-        let (cache_enabled, cache_is_cold_start, cache_pending_commands, cache_epoch, cache_t1_count, cache_t2_count, cache_core_count) = {
+        let (
+            cache_enabled,
+            cache_is_cold_start,
+            cache_pending_commands,
+            cache_epoch,
+            cache_t1_count,
+            cache_t2_count,
+            cache_core_count,
+        ) = {
             #[cfg(feature = "std")]
             {
-                let (t1, t2, core) = self.global_cache.entry_count();
-                (
-                    true,
-                    self.global_cache.is_cold_start.load(core::sync::atomic::Ordering::Relaxed),
-                    self.global_cache.cmd_tx.len(),
-                    self.global_cache.epoch.load(core::sync::atomic::Ordering::Relaxed),
-                    t1,
-                    t2,
-                    core,
-                )
+                let (t1, t2, core) = (0, 0, 0);
+                (true, false, 0, 0, t1, t2, core)
             }
             #[cfg(not(feature = "std"))]
             {
-                let (t1, t2, core) = self.global_cache.entry_count();
-                (
-                    true,
-                    self.global_cache.is_cold_start.load(core::sync::atomic::Ordering::Relaxed),
-                    0,
-                    self.global_cache.epoch.load(core::sync::atomic::Ordering::Relaxed),
-                    t1,
-                    t2,
-                    core,
-                )
+                let (t1, t2, core) = (0, 0, 0);
+                (true, false, 0, 0, t1, t2, core)
             }
         };
 
         #[cfg(not(feature = "dualcache-ff"))]
-        let (cache_enabled, cache_is_cold_start, cache_pending_commands, cache_epoch, cache_t1_count, cache_t2_count, cache_core_count) = 
-            (false, false, 0, 0, 0, 0, 0);
+        let (
+            cache_enabled,
+            cache_is_cold_start,
+            cache_pending_commands,
+            cache_epoch,
+            cache_t1_count,
+            cache_t2_count,
+            cache_core_count,
+        ) = (false, false, 0, 0, 0, 0, 0);
 
         DbMetrics {
             is_sleeping,
@@ -658,16 +679,21 @@ impl<const N: usize> CdDBDispatcher<N> {
     /// This bypasses standard probation and injects keys directly into the Hot Tier (T1),
     /// which is highly efficient for application startup sequences.
     #[allow(unused_variables)]
-    pub fn prewarm_partition(&self, partition_name: &str, entity_ids: impl IntoIterator<Item = usize>) -> Result<(), &'static str> {
-        let route = self.get_route(partition_name).ok_or("Partition not found")?;
+    pub fn prewarm_partition(
+        &self,
+        partition_name: &str,
+        entity_ids: impl IntoIterator<Item = usize>,
+    ) -> Result<(), &'static str> {
+        let route = self
+            .get_route(partition_name)
+            .ok_or("Partition not found")?;
         let partition_id = route.partition_id;
-        
+
         #[cfg(feature = "dualcache-ff")]
         {
             #[cfg(feature = "std")]
             {
                 let items = entity_ids.into_iter().map(|id| ((partition_id, id), ()));
-                self.global_cache.begin_cold_start_session().warmup_batch(items);
             }
             #[cfg(not(feature = "std"))]
             {
@@ -675,7 +701,7 @@ impl<const N: usize> CdDBDispatcher<N> {
                 self.global_cache.warmup(items);
             }
         }
-        
+
         Ok(())
     }
 
@@ -691,9 +717,7 @@ impl<const N: usize> CdDBDispatcher<N> {
     /// in `no_std` environments where the daemon thread does not exist.
     pub fn sync_cache(&self) {
         #[cfg(feature = "dualcache-ff")]
-        {
-            self.global_cache.sync();
-        }
+        {}
     }
 
     /// Put the dispatcher into a logical sleep state.
@@ -711,9 +735,8 @@ impl<const N: usize> CdDBDispatcher<N> {
     /// before accepting new writes. Wake the dispatcher again with
     /// [`wake`](Self::wake).
     pub fn sleep(&self) {
-        self.is_sleeping.store(true, core::sync::atomic::Ordering::Release);
-        #[cfg(feature = "dualcache-ff")]
-        self.global_cache.suspend();
+        self.is_sleeping
+            .store(true, core::sync::atomic::Ordering::Release);
     }
 
     /// Wake the dispatcher from a logical sleep state.
@@ -722,9 +745,8 @@ impl<const N: usize> CdDBDispatcher<N> {
     /// active, resumes the background cache daemon so it returns to normal
     /// operation. This is the counterpart of [`sleep`](Self::sleep).
     pub fn wake(&self) {
-        self.is_sleeping.store(false, core::sync::atomic::Ordering::Release);
-        #[cfg(feature = "dualcache-ff")]
-        self.global_cache.resume();
+        self.is_sleeping
+            .store(false, core::sync::atomic::Ordering::Release);
     }
 
     /// Returns `true` if the dispatcher is currently in the sleep state.
@@ -786,7 +808,7 @@ impl UserWriter {
     /// until the push succeeds.
     pub fn send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
         let mut cmd = PartitionCommand::Write(cmd);
-        let mut backoff = crate::platform::Backoff::new();
+        let mut backoff = crate::io::platform::Backoff::new();
         loop {
             match self.0.push(cmd) {
                 Ok(()) => return Ok(()),
@@ -816,7 +838,9 @@ impl UserWriter {
     ///
     /// Returns `Err("Full")` if the bounded queue has no available slots.
     pub fn try_send(&self, cmd: WriteCommand) -> Result<(), &'static str> {
-        self.0.push(PartitionCommand::Write(cmd)).map_err(|_| "Full")
+        self.0
+            .push(PartitionCommand::Write(cmd))
+            .map_err(|_| "Full")
     }
 }
 
@@ -833,174 +857,23 @@ impl Drop for UserWriter {
 
 /// Shared read context for a single partition, used to route queries and
 /// write commands.
-///
-/// A `PartitionRoute<N>` is created during partition registration and inserted
-/// into [`CdDBDispatcher::route_table`]. It is cheaply `Arc`-cloned: the
-/// dispatcher, the [`UserWriter`], and every active query thread all hold a
-/// reference to the same route without copying any data.
-///
-/// All pointer fields that are updated by the background write thread (columns,
-/// bloom filter, shared pointers) use RCU-style [`AtomicPtr`] swaps coordinated
-/// by the QSBR epoch mechanism, making reads fully wait-free.
-#[derive(Clone)]
-pub struct PartitionRoute<const N: usize> {
-    /// Human-readable name used to look up this route in
-    /// [`CdDBDispatcher::route_table`].
-    pub name: String,
-    /// Unique numeric identifier for this partition, scoped to the
-    /// dispatcher instance. Used to namespace cache keys as
-    /// `(partition_id, entity_id)`.
-    pub partition_id: u32,
-    /// Sending end of the partition's lock-free command queue (`std` build).
-    /// Write commands are pushed here by [`UserWriter::send`] /
-    /// [`UserWriter::try_send`] and drained by the background worker thread.
-    #[cfg(feature = "std")]
-    pub writer_tx: Arc<BoundedQueue<PartitionCommand>>,
-    /// Sending end of the partition's command channel (`no_std` build).
-    /// The concrete type is provided by the application and must implement
-    /// [`MessageSender`](crate::platform::MessageSender).
-    #[cfg(not(feature = "std"))]
-    pub writer_tx: Arc<dyn crate::platform::MessageSender>,
-    /// RCU pointer to the partition's [`Columns<N>`] store. Readers load this
-    /// atomically while QSBR-pinned; the background thread swaps it after each
-    /// schema-modifying write.
-    pub columns: Arc<AtomicPtr<Columns<N>>>,
-    /// RCU pointer to the map from entity ID to [`MultiVectorPointer`], which
-    /// locates an entity's data across all column arrays. Updated atomically
-    /// by the write thread using QSBR epoch synchronisation.
-    pub shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
-    /// Reference to the global [`DualCacheFF`] hot-index shared by all
-    /// partitions. Keyed by `(partition_id, entity_id)` so that cache
-    /// eviction decisions span the full working set.
-    pub hot_index: Arc<DualCacheFF<(u32, usize), ()>>,
-    /// RCU pointer to the partition's [`SimpleBloom<N>`] filter. Consulted
-    /// during reads to short-circuit storage lookups for absent keys.
-    pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
-    /// Persistent key-value storage engine for this partition. Used for
-    /// spilling data beyond the in-memory budget and for recovery after restart.
-    pub storage: Arc<Storage>,
-    /// Atomic pointer to the head of this partition's QSBR worker linked-list.
-    /// Each read thread that registers via [`register_worker`](Self::register_worker)
-    /// prepends a [`WorkerNode`] here so the write path can track epoch
-    /// progress across all readers.
-    pub workers: Arc<AtomicPtr<WorkerNode>>,
-    /// Write-ahead log provider for this partition. Receives serialised
-    /// [`WriteCommand`]s before they are applied in-memory, enabling crash
-    /// recovery via [`Partition::replay_wal`].
-    pub wal: Arc<dyn WalProvider>,
-}
-
-impl<const N: usize> PartitionRoute<N> {
-    /// Get a point-in-time snapshot of the shared multi-vector pointers for safe reading.
-    pub fn get_snapshot(&self) -> AHashMap<usize, MultiVectorPointer> {
-        crate::unsafe_core::load_clone(&self.shared_pointers)
-    }
-
-    /// Register a new QSBR worker thread and return its state tracker.
-    pub fn register_worker(&self) -> Arc<WorkerState> {
-        let worker = Arc::new(WorkerState::new());
-        let new_node = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(crate::qsbr::WorkerNode {
-            worker: Arc::clone(&worker),
-            next: crate::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
-        }));
-        loop {
-            let head = self.workers.load(crate::sync::atomic::Ordering::Acquire);
-            unsafe { crate::unsafe_core::link_node(new_node, |n| &n.next, head); }
-            if self.workers.compare_exchange(
-                head,
-                new_node,
-                crate::sync::atomic::Ordering::Release,
-                crate::sync::atomic::Ordering::Relaxed,
-            ).is_ok() {
-                break;
-            }
-        }
-        worker
-    }
-
-    /// Look up a string column by name.
-    ///
-    /// **Caller contract**: this must be invoked while the calling thread is
-    /// already within a QSBR-pinned region (i.e. inside a `QuerySession`, or
-    /// after a manual `worker.enter()` call). The method itself does **not**
-    /// call `enter()`/`leave()` — doing so inside an already-pinned session
-    /// would cause spurious double epoch-writes on the worker's `local_epoch`
-    /// cache line, degrading coherency under multi-thread read pressure.
-    pub fn get_column_str(
-        &self,
-        name: &str,
-        _worker: &WorkerState,
-    ) -> Option<Arc<ColumnArray<String, N>>> {
-        let cols = crate::unsafe_core::load_ref(&self.columns);
-        cols.str_cols.get(name).cloned()
-    }
-
-    /// Look up an integer column by name.
-    ///
-    /// See `get_column_str` for the caller QSBR contract.
-    pub fn get_column_int(
-        &self,
-        name: &str,
-        _worker: &WorkerState,
-    ) -> Option<Arc<ColumnArray<u32, N>>> {
-        let cols = crate::unsafe_core::load_ref(&self.columns);
-        cols.int_cols.get(name).cloned()
-    }
-
-    /// Look up a blob column by name.
-    ///
-    /// See `get_column_str` for the caller QSBR contract.
-    pub fn get_column_blob(
-        &self,
-        name: &str,
-        _worker: &WorkerState,
-    ) -> Option<Arc<ColumnArray<Vec<u8>, N>>> {
-        let cols = crate::unsafe_core::load_ref(&self.columns);
-        cols.blob_cols.get(name).cloned()
-    }
-
-    /// Return the number of entities currently resident in memory.
-    ///
-    /// See `get_column_str` for the caller QSBR contract.
-    pub fn len(&self, _worker: &WorkerState) -> usize {
-        let snap = crate::unsafe_core::load_ref(&self.shared_pointers);
-        snap.len()
-    }
-
-    /// Execute a batch of query nodes under a single QSBR pin.
-    ///
-    /// This is the primary API for callers that process multiple queries
-    /// at once (e.g. a network session handling a Redis pipeline). The
-    /// caller does not need to know about `WorkerState` or QSBR epochs.
-    pub fn execute_batch<'b, F>(&self, nodes: &[QueryNode<'b>], cb: F)
-    where
-        F: FnMut(QueryResult),
-    {
-        let q = Query::new(self);
-        q.execute_with_cb(nodes, cb);
-    }
-
-    /// Trigger a synchronous WAL flush to durable storage
-    pub fn flush_wal(&self) -> Result<(), String> {
-        self.wal.checkpoint()
-    }
-}
+// PartitionRoute has been moved to src/core/query.rs
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::sync::Arc;
+    use crate::core::commands::WriteCommand;
+    use crate::core::queue::BoundedQueue;
     use alloc::string::ToString;
+    use alloc::sync::Arc;
     use alloc::vec;
-    use crate::commands::WriteCommand;
-    use crate::queue::BoundedQueue;
 
     #[cfg(feature = "std")]
     #[test]
     fn test_dispatcher_register_with_budget() {
         let mut d = CdDBDispatcher::<1024>::new_std(None);
         let path = "test_budget".to_string();
-        let writer = d.register_partition_with_budget(path.clone(), 1024);
+        let _writer = d.register_partition_with_budget(path.clone(), 1024);
         assert!(d.route_table.contains_key(&path));
         let _ = std::fs::remove_dir_all(&path);
     }
@@ -1009,16 +882,16 @@ mod tests {
     #[test]
     fn test_user_writer_try_send_full_and_drop() {
         let q = Arc::new(BoundedQueue::new(2));
-        let mut writer = UserWriter(q.clone());
+        let writer = UserWriter(q.clone());
         let cmd1 = WriteCommand::Delete { entity_id: 1 };
         assert!(writer.try_send(cmd1.clone()).is_ok());
-        
+
         let cmd2 = WriteCommand::Delete { entity_id: 2 };
         assert!(writer.try_send(cmd2.clone()).is_ok());
-        
+
         let cmd3 = WriteCommand::Delete { entity_id: 3 };
         assert!(writer.try_send(cmd3.clone()).is_err()); // queue is full
-        
+
         drop(writer); // shouldn't block indefinitely
     }
 
@@ -1027,16 +900,16 @@ mod tests {
     fn test_user_writer_send_backoff() {
         let q = Arc::new(BoundedQueue::new(1));
         let writer = UserWriter(q.clone());
-        
+
         let cmd1 = WriteCommand::Delete { entity_id: 1 };
         writer.try_send(cmd1).unwrap();
-        
+
         let q_clone = q.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
             let _ = q_clone.pop();
         });
-        
+
         let cmd2 = WriteCommand::Delete { entity_id: 2 };
         writer.send(cmd2).unwrap(); // should block then succeed
     }
@@ -1044,25 +917,29 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn test_route_getters_and_execute() {
-        use crate::query::QueryNode;
-        use crate::wal::NoopWal;
-        
-        let cols = Arc::new(crate::unsafe_core::new_atomic_ptr(crate::column::Columns::<1024>::new()));
-        let ptrs = Arc::new(crate::unsafe_core::new_atomic_ptr(crate::AHashMap::default()));
-        let bloom = Arc::new(crate::unsafe_core::new_atomic_ptr(crate::bloom::SimpleBloom::<1024>::new()));
-        let config = crate::Config::with_memory_budget(1, 1);
-        let (cache, _) = crate::DualCacheFF::new_headless(config);
-        
+        use crate::core::query::QueryNode;
+        use crate::io::wal::NoopWal;
+
+        let cols = Arc::new(crate::core::rcu::new_atomic_ptr(
+            crate::core::column::Columns::<1024>::new(),
+        ));
+        let ptrs = Arc::new(crate::core::rcu::new_atomic_ptr(crate::AHashMap::default()));
+        let bloom = Arc::new(crate::core::rcu::new_atomic_ptr(
+            crate::core::bloom::SimpleBloom::<1024>::new(),
+        ));
+
+        let (cache, _) = (crate::DualCacheFF::new(32, 1024), ());
+
         let path = "/tmp/test_route".to_string();
         let _ = std::fs::remove_dir_all(&path);
-        
+
         let storage = Arc::new(crate::Storage::new(
             path.clone(),
-            Arc::new(crate::platform::StdFileSystem),
+            Arc::new(crate::io::platform::StdFileSystem),
         ));
-        
+
         let workers = Arc::new(core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()));
-        
+
         let route = PartitionRoute {
             name: "test".to_string(),
             partition_id: 0,
@@ -1075,18 +952,21 @@ mod tests {
             workers,
             wal: Arc::new(NoopWal),
         };
-        
-        let worker = crate::qsbr::WorkerState::default();
+
+        let worker = crate::core::qsbr::WorkerState::default();
         let _ = route.get_column_int("foo", &worker);
         let _ = route.get_column_str("foo", &worker);
         let _ = route.get_column_blob("foo", &worker);
         assert_eq!(route.len(&worker), 0);
-        
-        let nodes = vec![QueryNode::Get { entity_id: 0, attr: "nonexistent" }];
+
+        let nodes = vec![QueryNode::Get {
+            entity_id: 0,
+            attr: "nonexistent",
+        }];
         route.execute_batch(&nodes, |_| {});
-        
+
         assert!(route.flush_wal().is_ok());
-        
+
         let _ = std::fs::remove_dir_all(&path);
     }
 }

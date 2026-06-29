@@ -1,8 +1,8 @@
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicUsize, AtomicU8, Ordering};
-use alloc::vec::Vec;
-use alloc::boxed::Box;
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 // ── Slot state constants ───────────────────────────────────────────────────
 
@@ -110,32 +110,66 @@ impl<T> BoundedQueue<T> {
     ///   never blocks or spins.
     #[inline(always)]
     pub fn push(&self, item: T) -> Result<(), T> {
-        let tail = self.tail.load(Ordering::Relaxed);
-        let head = self.head.load(Ordering::Acquire);
+        let mut tail = self.tail.load(Ordering::Relaxed);
+        loop {
+            let head = self.head.load(Ordering::Acquire);
 
-        // Pre-check: if physically full, don't even try to FAA.
-        if tail.wrapping_sub(head) >= self.buffer.len() {
-            return Err(item);
+            // Pre-check: if physically full, return Err.
+            if tail.wrapping_sub(head) >= self.buffer.len() {
+                return Err(item);
+            }
+
+            let idx = tail & self.mask;
+            let slot = &self.buffer[idx];
+
+            let state = slot.state.load(Ordering::Acquire);
+            if state != EMPTY {
+                let actual = self.tail.load(Ordering::Relaxed);
+                if actual == tail {
+                    // Tail hasn't changed but slot isn't empty.
+                    // This could be a slow consumer that advanced head but hasn't set EMPTY yet.
+                    // Re-check head to see if we are truly full.
+                    let current_head = self.head.load(Ordering::Acquire);
+                    if tail.wrapping_sub(current_head) >= self.buffer.len() {
+                        return Err(item);
+                    } else {
+                        core::hint::spin_loop();
+                        continue;
+                    }
+                } else {
+                    tail = actual;
+                    continue;
+                }
+            }
+
+            // Attempt to claim the tail ticket
+            match self.tail.compare_exchange_weak(
+                tail,
+                tail.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    // Successfully claimed tail. Wait for the slot to become truly EMPTY
+                    // (in case of memory reordering from consumer) and set it to WRITING.
+                    while slot
+                        .state
+                        .compare_exchange_weak(EMPTY, WRITING, Ordering::Acquire, Ordering::Relaxed)
+                        .is_err()
+                    {
+                        core::hint::spin_loop();
+                    }
+                    unsafe {
+                        (*slot.data.get()).write(item);
+                    }
+                    slot.state.store(READY, Ordering::Release);
+                    return Ok(());
+                }
+                Err(actual) => {
+                    tail = actual;
+                }
+            }
         }
-
-        // FAA claims a position.
-        let idx = self.tail.fetch_add(1, Ordering::Relaxed) & self.mask;
-        let slot = &self.buffer[idx];
-
-        // Physical gate: only proceed if the slot is truly empty.
-        if slot
-            .state
-            .compare_exchange(EMPTY, WRITING, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            return Err(item);
-        }
-
-        unsafe {
-            (*slot.data.get()).write(item);
-        }
-        slot.state.store(READY, Ordering::Release);
-        Ok(())
     }
 
     /// Attempts a wait-free single-consumer dequeue.

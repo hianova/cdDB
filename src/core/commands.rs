@@ -1,8 +1,8 @@
 use crate::AHashMap;
+use crate::core::column::MultiVectorPointer;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::format;
-use crate::partition::MultiVectorPointer;
 
 /// A dynamically typed value that can be stored in a cdDB column.
 ///
@@ -113,7 +113,9 @@ impl<V> Attributes<V> {
         for _ in 0..count {
             let k_len = u32::from_le_bytes(buf.get(*pos..*pos + 4)?.try_into().ok()?) as usize;
             *pos += 4;
-            let k = core::str::from_utf8(buf.get(*pos..*pos + k_len)?).ok()?.to_string();
+            let k = core::str::from_utf8(buf.get(*pos..*pos + k_len)?)
+                .ok()?
+                .to_string();
             *pos += k_len;
             let v = val_decoder(buf, pos);
             map.insert(k, v);
@@ -158,7 +160,14 @@ pub enum WriteCommand {
     /// Batch insert multiple standard entities in a single WAL record.
     ///
     /// Each tuple contains `(entity_id, string_attrs, int_attrs, blob_attrs)`.
-    BatchInsert(Vec<(usize, Attributes<String>, Attributes<u32>, Attributes<Vec<u8>>)>),
+    BatchInsert(
+        Vec<(
+            usize,
+            Attributes<String>,
+            Attributes<u32>,
+            Attributes<Vec<u8>>,
+        )>,
+    ),
     /// Delete an entity.
     Delete {
         /// The entity ID to delete.
@@ -196,10 +205,7 @@ impl WriteCommand {
     ///
     /// let cmd = WriteCommand::insert(42, attrs);
     /// ```
-    pub fn insert(
-        entity_id: usize,
-        typed_attrs: AHashMap<String, ColumnValue>,
-    ) -> Self {
+    pub fn insert(entity_id: usize, typed_attrs: AHashMap<String, ColumnValue>) -> Self {
         let mut attributes = Attributes::new();
         let mut attributes_int = Attributes::new();
         let mut attributes_blob = Attributes::new();
@@ -279,7 +285,12 @@ impl WriteCommand {
                 buf.push(2);
                 buf.extend_from_slice(&(*entity_id as u64).to_le_bytes());
             }
-            WriteCommand::InsertFast { entity_id, epoch, record_type, payload } => {
+            WriteCommand::InsertFast {
+                entity_id,
+                epoch,
+                record_type,
+                payload,
+            } => {
                 buf.push(3);
                 buf.extend_from_slice(&(*entity_id as u64).to_le_bytes());
                 buf.extend_from_slice(&epoch.to_le_bytes());
@@ -306,27 +317,38 @@ impl WriteCommand {
         pos += 1;
         match type_id {
             0 => {
-                let entity_id = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
+                let entity_id =
+                    u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
                 pos += 8;
-                let attributes = Attributes::<String>::decode_from(buf, &mut pos, |b: &[u8], p: &mut usize| {
-                    let len = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap()) as usize;
-                    *p += 4;
-                    let s = core::str::from_utf8(b.get(*p..*p + len).unwrap()).unwrap().to_string();
-                    *p += len;
-                    s
-                })?;
-                let attributes_int = Attributes::<u32>::decode_from(buf, &mut pos, |b: &[u8], p: &mut usize| {
-                    let v = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap());
-                    *p += 4;
-                    v
-                })?;
-                let attributes_blob = Attributes::<Vec<u8>>::decode_from(buf, &mut pos, |b: &[u8], p: &mut usize| {
-                    let len = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap()) as usize;
-                    *p += 4;
-                    let v = b.get(*p..*p + len).unwrap().to_vec();
-                    *p += len;
-                    v
-                })?;
+                let attributes =
+                    Attributes::<String>::decode_from(buf, &mut pos, |b: &[u8], p: &mut usize| {
+                        let len = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap())
+                            as usize;
+                        *p += 4;
+                        let s = core::str::from_utf8(b.get(*p..*p + len).unwrap())
+                            .unwrap()
+                            .to_string();
+                        *p += len;
+                        s
+                    })?;
+                let attributes_int =
+                    Attributes::<u32>::decode_from(buf, &mut pos, |b: &[u8], p: &mut usize| {
+                        let v = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap());
+                        *p += 4;
+                        v
+                    })?;
+                let attributes_blob = Attributes::<Vec<u8>>::decode_from(
+                    buf,
+                    &mut pos,
+                    |b: &[u8], p: &mut usize| {
+                        let len = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap())
+                            as usize;
+                        *p += 4;
+                        let v = b.get(*p..*p + len).unwrap().to_vec();
+                        *p += len;
+                        v
+                    },
+                )?;
                 Some(WriteCommand::Insert {
                     entity_id,
                     attributes,
@@ -341,35 +363,56 @@ impl WriteCommand {
                 for _ in 0..count {
                     let id = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
                     pos += 8;
-                    let attrs = Attributes::<String>::decode_from(buf, &mut pos, |b: &[u8], p: &mut usize| {
-                        let len = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap()) as usize;
-                        *p += 4;
-                        let s = core::str::from_utf8(b.get(*p..*p + len).unwrap()).unwrap().to_string();
-                        *p += len;
-                        s
-                    })?;
-                    let attrs_int = Attributes::<u32>::decode_from(buf, &mut pos, |b: &[u8], p: &mut usize| {
-                        let v = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap());
-                        *p += 4;
-                        v
-                    })?;
-                    let attrs_blob = Attributes::<Vec<u8>>::decode_from(buf, &mut pos, |b: &[u8], p: &mut usize| {
-                        let len = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap()) as usize;
-                        *p += 4;
-                        let v = b.get(*p..*p + len).unwrap().to_vec();
-                        *p += len;
-                        v
-                    })?;
+                    let attrs = Attributes::<String>::decode_from(
+                        buf,
+                        &mut pos,
+                        |b: &[u8], p: &mut usize| {
+                            let len =
+                                u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap())
+                                    as usize;
+                            *p += 4;
+                            let s = core::str::from_utf8(b.get(*p..*p + len).unwrap())
+                                .unwrap()
+                                .to_string();
+                            *p += len;
+                            s
+                        },
+                    )?;
+                    let attrs_int = Attributes::<u32>::decode_from(
+                        buf,
+                        &mut pos,
+                        |b: &[u8], p: &mut usize| {
+                            let v =
+                                u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap());
+                            *p += 4;
+                            v
+                        },
+                    )?;
+                    let attrs_blob = Attributes::<Vec<u8>>::decode_from(
+                        buf,
+                        &mut pos,
+                        |b: &[u8], p: &mut usize| {
+                            let len =
+                                u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap())
+                                    as usize;
+                            *p += 4;
+                            let v = b.get(*p..*p + len).unwrap().to_vec();
+                            *p += len;
+                            v
+                        },
+                    )?;
                     items.push((id, attrs, attrs_int, attrs_blob));
                 }
                 Some(WriteCommand::BatchInsert(items))
             }
             2 => {
-                let entity_id = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
+                let entity_id =
+                    u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
                 Some(WriteCommand::Delete { entity_id })
             }
             3 => {
-                let entity_id = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
+                let entity_id =
+                    u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
                 pos += 8;
                 let epoch = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?);
                 pos += 4;
@@ -378,7 +421,12 @@ impl WriteCommand {
                 let len = u32::from_le_bytes(buf.get(pos..pos + 4)?.try_into().ok()?) as usize;
                 pos += 4;
                 let payload = alloc::sync::Arc::new(buf.get(pos..pos + len)?.to_vec());
-                Some(WriteCommand::InsertFast { entity_id, epoch, record_type, payload })
+                Some(WriteCommand::InsertFast {
+                    entity_id,
+                    epoch,
+                    record_type,
+                    payload,
+                })
             }
             _ => None,
         }
@@ -417,7 +465,8 @@ impl core::fmt::Debug for PartitionCommand {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             PartitionCommand::Write(w) => f.debug_tuple("Write").field(w).finish(),
-            PartitionCommand::InternalLoad { entity_id, .. } => f.debug_struct("InternalLoad")
+            PartitionCommand::InternalLoad { entity_id, .. } => f
+                .debug_struct("InternalLoad")
                 .field("entity_id", entity_id)
                 .finish(),
             PartitionCommand::Shutdown => f.debug_tuple("Shutdown").finish(),
@@ -483,7 +532,10 @@ impl ITOpsRecord {
         attrs.insert("message".to_string(), self.message.clone());
 
         let mut attrs_int = AHashMap::default();
-        attrs_int.insert("timestamp".to_string(), (self.timestamp % (u32::MAX as u64)) as u32);
+        attrs_int.insert(
+            "timestamp".to_string(),
+            (self.timestamp % (u32::MAX as u64)) as u32,
+        );
         attrs_int.insert("cpu_milli".to_string(), (self.cpu_usage * 1000.0) as u32);
         attrs_int.insert("mem_milli".to_string(), (self.mem_usage * 1000.0) as u32);
         attrs_int.insert("response_time".to_string(), self.response_time_ms);
@@ -495,17 +547,25 @@ impl ITOpsRecord {
 /// Extension trait for easier ITOps data ingestion
 pub trait ITOpsIngest {
     /// Converts and inserts an operations record as a WriteCommand.
-    fn insert_ops_record(&self, entity_id: usize, record: ITOpsRecord) -> crate::commands::WriteCommand;
+    fn insert_ops_record(
+        &self,
+        entity_id: usize,
+        record: ITOpsRecord,
+    ) -> crate::core::commands::WriteCommand;
 }
 
 impl ITOpsIngest for ITOpsRecord {
-    fn insert_ops_record(&self, entity_id: usize, record: ITOpsRecord) -> crate::commands::WriteCommand {
+    fn insert_ops_record(
+        &self,
+        entity_id: usize,
+        record: ITOpsRecord,
+    ) -> crate::core::commands::WriteCommand {
         let (attributes, attributes_int) = record.to_cd_db_params();
-        crate::commands::WriteCommand::Insert {
+        crate::core::commands::WriteCommand::Insert {
             entity_id,
             attributes,
             attributes_int,
-            attributes_blob: crate::commands::Attributes::<Vec<u8>>::new(),
+            attributes_blob: crate::core::commands::Attributes::<Vec<u8>>::new(),
         }
     }
 }
@@ -519,18 +579,23 @@ mod tests {
     fn test_write_command_encode_decode() {
         let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), 42);
-        
+
         let cmd = WriteCommand::Insert {
             entity_id: 1,
             attributes: Attributes::new(),
             attributes_int: attrs_int,
             attributes_blob: Attributes::new(),
         };
-        
+
         let bytes = cmd.encode();
         let decoded = WriteCommand::decode(&bytes).unwrap();
-        
-        if let WriteCommand::Insert { entity_id, attributes_int, .. } = decoded {
+
+        if let WriteCommand::Insert {
+            entity_id,
+            attributes_int,
+            ..
+        } = decoded
+        {
             assert_eq!(entity_id, 1);
             assert_eq!(attributes_int.get("val"), Some(&42));
         } else {
@@ -554,10 +619,13 @@ mod tests {
         let dec = Attributes::<String>::decode_from(&buf, &mut pos, |b, p| {
             let len = u32::from_le_bytes(b.get(*p..*p + 4).unwrap().try_into().unwrap()) as usize;
             *p += 4;
-            let s = core::str::from_utf8(b.get(*p..*p + len).unwrap()).unwrap().to_string();
+            let s = core::str::from_utf8(b.get(*p..*p + len).unwrap())
+                .unwrap()
+                .to_string();
             *p += len;
             s
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(dec.get("key"), Some(&"val".to_string()));
     }
 
@@ -574,7 +642,13 @@ mod tests {
             response_time_ms: 200,
         };
         let cmd = record.insert_ops_record(10, record.clone());
-        if let WriteCommand::Insert { entity_id, attributes, attributes_int, .. } = cmd {
+        if let WriteCommand::Insert {
+            entity_id,
+            attributes,
+            attributes_int,
+            ..
+        } = cmd
+        {
             assert_eq!(entity_id, 10);
             assert_eq!(attributes.get("service").unwrap(), "web");
             assert_eq!(attributes_int.get("cpu_milli").unwrap(), &500);
@@ -585,14 +659,20 @@ mod tests {
 
     #[test]
     fn test_write_command_insert_helper() {
-        use crate::commands::ColumnValue;
+        use crate::core::commands::ColumnValue;
         let mut attrs = crate::AHashMap::default();
         attrs.insert("s".to_string(), ColumnValue::Str("foo".to_string()));
         attrs.insert("i".to_string(), ColumnValue::Int(42));
         attrs.insert("b".to_string(), ColumnValue::Blob(vec![1, 2]));
 
         let cmd = WriteCommand::insert(99, attrs);
-        if let WriteCommand::Insert { entity_id, attributes, attributes_int, attributes_blob } = cmd {
+        if let WriteCommand::Insert {
+            entity_id,
+            attributes,
+            attributes_int,
+            attributes_blob,
+        } = cmd
+        {
             assert_eq!(entity_id, 99);
             assert_eq!(attributes.get("s"), Some(&"foo".to_string()));
             assert_eq!(attributes_int.get("i"), Some(&42));
@@ -634,7 +714,10 @@ mod tests {
         };
         let enc_fast = fast.encode();
         let dec_fast = WriteCommand::decode(&enc_fast).unwrap();
-        if let WriteCommand::InsertFast { entity_id, epoch, .. } = dec_fast {
+        if let WriteCommand::InsertFast {
+            entity_id, epoch, ..
+        } = dec_fast
+        {
             assert_eq!(entity_id, 1);
             assert_eq!(epoch, 2);
         } else {
@@ -648,12 +731,7 @@ mod tests {
         let mut attrs_blob = Attributes::new();
         attrs_blob.insert("data".to_string(), vec![255]);
 
-        let batch = WriteCommand::BatchInsert(vec![(
-            5,
-            attrs_str,
-            attrs_int,
-            attrs_blob,
-        )]);
+        let batch = WriteCommand::BatchInsert(vec![(5, attrs_str, attrs_int, attrs_blob)]);
         let enc_batch = batch.encode();
         let dec_batch = WriteCommand::decode(&enc_batch).unwrap();
         if let WriteCommand::BatchInsert(items) = dec_batch {
@@ -687,8 +765,14 @@ mod tests {
         }
 
         // Test PartitionCommand formatting
-        assert_eq!(format!("{:?}", PartitionCommand::Write(WriteCommand::Delete { entity_id: 1 })), "Write(Delete { entity_id: 1 })");
-        
+        assert_eq!(
+            format!(
+                "{:?}",
+                PartitionCommand::Write(WriteCommand::Delete { entity_id: 1 })
+            ),
+            "Write(Delete { entity_id: 1 })"
+        );
+
         // Test Attributes::into_iter
         let mut attrs = Attributes::new();
         attrs.insert("x".to_string(), "y".to_string());
@@ -707,5 +791,3 @@ mod tests {
         assert_eq!(attrs_from.get("a"), Some(&1));
     }
 }
-
-

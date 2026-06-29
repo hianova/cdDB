@@ -1,10 +1,10 @@
-use alloc::sync::Arc;
-use alloc::vec::Vec;
+use crate::core::commands::WriteCommand;
+use crate::io::platform::FileSystem;
 use alloc::string::String;
 #[cfg(feature = "std")]
 use alloc::string::ToString;
-use crate::commands::WriteCommand;
-use crate::platform::FileSystem;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 /// Durability level for WAL and storage writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,9 +12,10 @@ pub enum DurabilityMode {
     /// AI/Compute mode: Protect SSD, optimize throughput.
     /// Flushes and syncs data to disk at the specified interval.
     Relaxed(core::time::Duration),
-    
+
     /// HFT/Strict mode: Guarantee no data loss.
-    /// Every write is immediately flushed and synced to disk using fdatasync.
+    /// ⚠️ **DANGER**: Every write is immediately flushed and synced to disk using `fdatasync`.
+    /// This causes severe write amplification on modern SSDs if used for high-frequency small writes.
     Strict,
 }
 
@@ -33,6 +34,12 @@ pub struct FlushConfigBuilder {
     expert_mode: bool,
 }
 
+impl Default for FlushConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FlushConfigBuilder {
     pub fn new() -> Self {
         Self {
@@ -41,22 +48,22 @@ impl FlushConfigBuilder {
             expert_mode: false,
         }
     }
-    
+
     pub fn with_batch_size(mut self, size: usize) -> Self {
         self.batch_size_bytes = size;
         self
     }
-    
+
     pub fn with_ttl_micros(mut self, micros: u64) -> Self {
         self.ttl_micros = micros;
         self
     }
-    
+
     pub fn unlock_expert_danger_zone(mut self) -> Self {
         self.expert_mode = true;
         self
     }
-    
+
     pub fn build(self) -> FlushConfig {
         if self.ttl_micros < 1000 && !self.expert_mode {
             panic!(
@@ -75,10 +82,25 @@ impl FlushConfigBuilder {
 }
 
 /// Defines the operation mode for the Write-Ahead Log.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[derive(Default)]
+///
+/// # ⚠️ CRITICAL WARNING: SSD WEAR OUT & WRITE AMPLIFICATION ⚠️
+///
+/// **DO NOT USE `WalMode::Sync` FOR HIGH-FREQUENCY LOGGING.**
+///
+/// If you are using cdDB to store high-frequency feedback logs (e.g., AI chat logs,
+/// analytics events), `WalMode::Sync` will trigger an `fdatasync()` on **every single insert**.
+/// Even if you only write 10 bytes, the underlying SSD Flash Translation Layer (FTL) may
+/// amplify this into writing a full 16KB or 64KB physical block, rapidly degrading your SSD's
+/// lifespan (similar to the severe Codex SQLite write-amplification incident that wrote 640TB/year).
+///
+/// For high-frequency, small-payload logging, **you MUST use `WalMode::Async100ms`**
+/// or `WalMode::Custom { durability: DurabilityMode::Relaxed(...) }`. This buffers writes
+/// and batches the `fdatasync()` calls (e.g., every 100ms or 64KB), virtually eliminating
+/// hardware-level write amplification.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum WalMode {
     /// Synchronous WAL: flushes to disk synchronously.
+    /// ⚠️ **DANGER**: Causes extreme SSD write amplification under high throughput. Use only for low-frequency, high-value financial/critical data.
     #[default]
     Sync,
     /// Asynchronous WAL: flushes to disk in batches (e.g. every 100ms).
@@ -89,7 +111,6 @@ pub enum WalMode {
         flush: FlushConfig,
     },
 }
-
 
 /// Defines the standard interface for a Write-Ahead Log provider.
 pub trait WalProvider: Send + Sync {
@@ -107,13 +128,21 @@ pub trait WalProvider: Send + Sync {
 pub struct NoopWal;
 impl WalProvider for NoopWal {
     /// Accepts the command without writing anything; always returns `Ok(())`.
-    fn append(&self, _cmd: &WriteCommand) -> Result<(), String> { Ok(()) }
+    fn append(&self, _cmd: &WriteCommand) -> Result<(), String> {
+        Ok(())
+    }
     /// Accepts the batch without writing anything; always returns `Ok(())`.
-    fn append_batch(&self, _commands: &[&WriteCommand]) -> Result<(), String> { Ok(()) }
+    fn append_batch(&self, _commands: &[&WriteCommand]) -> Result<(), String> {
+        Ok(())
+    }
     /// No-op checkpoint; always returns `Ok(())`.
-    fn checkpoint(&self) -> Result<(), String> { Ok(()) }
+    fn checkpoint(&self) -> Result<(), String> {
+        Ok(())
+    }
     /// Returns an empty byte vector because no data is ever written.
-    fn read_all(&self) -> Result<Vec<u8>, String> { Ok(Vec::new()) }
+    fn read_all(&self) -> Result<Vec<u8>, String> {
+        Ok(Vec::new())
+    }
 }
 
 /// A standard library-backed WAL implementation that supports sync and async writing.
@@ -126,7 +155,7 @@ pub struct StdWal {
     pub mode: WalMode,
     /// Shared writer to the underlying file.
     #[cfg(feature = "std")]
-    pub writer: Arc<crate::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
+    pub writer: Arc<crate::core::Mutex<Option<std::io::BufWriter<std::fs::File>>>>,
     /// Buffer for async batched writes.
     #[cfg(feature = "std")]
     pub async_buffer: Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
@@ -139,7 +168,7 @@ impl StdWal {
     /// Creates a new `StdWal` at the specified path and starts background threads if needed.
     ///
     /// Opens (or creates) the WAL file in append mode and wraps it in a 64 KiB
-    /// [`BufWriter`](std::io::BufWriter) protected by a [`Mutex`](crate::sync::Mutex).
+    /// [`BufWriter`](std::io::BufWriter) protected by a [`Mutex`](crate::core::Mutex).
     ///
     /// # Note
     ///
@@ -156,27 +185,35 @@ impl StdWal {
                 .open(&path)
                 .ok()
                 .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
-            
-            let writer = Arc::new(crate::sync::Mutex::new(file_opt));
-            let async_buffer = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::with_capacity(10000)));
+
+            let writer = Arc::new(crate::core::Mutex::new(file_opt));
+            let async_buffer =
+                Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::with_capacity(10000)));
             let condvar = Arc::new(std::sync::Condvar::new());
 
-            let is_async = match mode {
-                WalMode::Async100ms => true,
-                WalMode::Custom { durability: DurabilityMode::Relaxed(_), .. } => true,
-                _ => false,
-            };
+            let is_async = matches!(
+                mode,
+                WalMode::Async100ms
+                    | WalMode::Custom {
+                        durability: DurabilityMode::Relaxed(_),
+                        ..
+                    }
+            );
 
             if is_async {
                 let bg_writer = Arc::clone(&writer);
                 let bg_buffer = Arc::clone(&async_buffer);
                 let bg_condvar = Arc::clone(&condvar);
-                
+
                 let (target_interval, batch_size) = match mode {
                     WalMode::Async100ms => (std::time::Duration::from_millis(1), 64 * 1024),
-                    WalMode::Custom { durability: DurabilityMode::Relaxed(_), flush } => {
-                        (std::time::Duration::from_micros(flush.ttl_micros), flush.batch_size_bytes)
-                    }
+                    WalMode::Custom {
+                        durability: DurabilityMode::Relaxed(_),
+                        flush,
+                    } => (
+                        std::time::Duration::from_micros(flush.ttl_micros),
+                        flush.batch_size_bytes,
+                    ),
                     _ => (std::time::Duration::from_millis(1), 64 * 1024),
                 };
 
@@ -208,7 +245,7 @@ impl StdWal {
                                     }
                                 }
                             }
-                            
+
                             let mut w_lock = bg_writer.lock().unwrap();
                             if let Some(w) = w_lock.as_mut() {
                                 use std::io::Write;
@@ -262,11 +299,14 @@ impl WalProvider for StdWal {
 
         #[cfg(feature = "std")]
         {
-            let is_async = match self.mode {
-                WalMode::Async100ms => true,
-                WalMode::Custom { durability: DurabilityMode::Relaxed(_), .. } => true,
-                _ => false,
-            };
+            let is_async = matches!(
+                self.mode,
+                WalMode::Async100ms
+                    | WalMode::Custom {
+                        durability: DurabilityMode::Relaxed(_),
+                        ..
+                    }
+            );
             if is_async {
                 let mut lock = self.async_buffer.lock().unwrap();
                 lock.push(buf);
@@ -312,11 +352,14 @@ impl WalProvider for StdWal {
         if !buf.is_empty() {
             #[cfg(feature = "std")]
             {
-                let is_async = match self.mode {
-                    WalMode::Async100ms => true,
-                    WalMode::Custom { durability: DurabilityMode::Relaxed(_), .. } => true,
-                    _ => false,
-                };
+                let is_async = matches!(
+                    self.mode,
+                    WalMode::Async100ms
+                        | WalMode::Custom {
+                            durability: DurabilityMode::Relaxed(_),
+                            ..
+                        }
+                );
                 if is_async {
                     let mut lock = self.async_buffer.lock().unwrap();
                     lock.push(buf);
@@ -366,7 +409,6 @@ impl WalProvider for StdWal {
         Ok(())
     }
 
-
     /// Reads the entire WAL file as a raw byte vector.
     ///
     /// Before delegating to the [`FileSystem`] layer, this method flushes the
@@ -394,7 +436,7 @@ impl WalProvider for StdWal {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use crate::platform::StdFileSystem;
+    use crate::io::platform::StdFileSystem;
 
     #[test]
     fn test_noop_wal() {
@@ -444,7 +486,7 @@ mod tests {
         let path = "test_wal_fallback.log".to_string();
         let _ = std::fs::remove_file(&path);
         let wal = StdWal::new(path.clone(), fs, WalMode::Sync);
-        
+
         *wal.writer.lock().unwrap() = None;
         let cmd = WriteCommand::Delete { entity_id: 1 };
         wal.append(&cmd).unwrap();
@@ -454,18 +496,22 @@ mod tests {
         assert!(!data.is_empty());
         let _ = std::fs::remove_file(&path);
     }
-    
+
     #[cfg(feature = "std")]
     #[test]
     fn test_std_wal_custom_relaxed() {
         let fs = Arc::new(StdFileSystem);
         let path = "test_wal_custom.log".to_string();
         let _ = std::fs::remove_file(&path);
-        let wal = StdWal::new(path.clone(), fs, WalMode::Custom {
-            durability: DurabilityMode::Relaxed(std::time::Duration::from_millis(50)),
-            flush: FlushConfigBuilder::new().build(),
-        });
-        
+        let wal = StdWal::new(
+            path.clone(),
+            fs,
+            WalMode::Custom {
+                durability: DurabilityMode::Relaxed(std::time::Duration::from_millis(50)),
+                flush: FlushConfigBuilder::new().build(),
+            },
+        );
+
         let cmd = WriteCommand::Delete { entity_id: 1 };
         wal.append(&cmd).unwrap();
         wal.append_batch(&[&cmd]).unwrap();
