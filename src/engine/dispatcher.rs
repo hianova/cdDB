@@ -143,6 +143,9 @@ pub struct CdDBDispatcher<const N: usize> {
             4096,
             262144,
             266304,
+            16,
+            1024,
+            64,
         >,
     >,
     /// Monotonically increasing counter used to assign a unique `u32` ID to
@@ -195,7 +198,7 @@ impl<const N: usize> CdDBDispatcher<N> {
     ) -> Self {
         #[cfg(feature = "dualcache-ff")]
         #[cfg(feature = "dualcache-ff")]
-        let global_cache = DualCacheFF::new(32, 1024);
+        let global_cache = DualCacheFF::new();
 
         #[cfg(not(feature = "dualcache-ff"))]
         let global_cache = DualCacheFF::new(Config);
@@ -487,6 +490,9 @@ impl<const N: usize> CdDBDispatcher<N> {
                 4096,
                 262144,
                 266304,
+                16,
+                1024,
+                64,
             >,
         >,
     ) {

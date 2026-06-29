@@ -96,6 +96,9 @@ pub struct Partition<const N: usize> {
             4096,
             262144,
             266304,
+            16,
+            1024,
+            64,
         >,
     >, // Just for heat tracking
     /// The unique numeric ID of this partition.
@@ -147,6 +150,9 @@ impl<const N: usize> Partition<N> {
                 4096,
                 262144,
                 266304,
+                16,
+                1024,
+                64,
             >,
         >,
         partition_id: u32,
@@ -656,7 +662,7 @@ mod tests {
         }));
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
         let bloom_filter = Arc::new(new_atomic_ptr(SimpleBloom::<512>::new()));
-        let hot_index = Arc::new(DualCacheFF::new(32, 1024));
+        let hot_index = Arc::new(DualCacheFF::new());
 
         let rx = Arc::new(crate::core::queue::BoundedQueue::new(16));
         let mut partition = Partition::new(

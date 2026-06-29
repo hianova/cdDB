@@ -168,6 +168,9 @@ mod dualcache_stub {
 pub use dualcache_ff::DualCacheFF;
 
 #[cfg(feature = "dualcache-ff")]
+pub use dualcache_ff;
+
+#[cfg(feature = "dualcache-ff")]
 #[cfg(not(feature = "std"))]
 pub use dualcache_ff::StaticDualCache as DualCacheFF;
 

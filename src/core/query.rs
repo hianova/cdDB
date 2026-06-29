@@ -654,6 +654,9 @@ pub struct PartitionRoute<const N: usize> {
             4096,
             262144,
             266304,
+            16,
+            1024,
+            64,
         >,
     >,
     /// RCU pointer to the partition's [`SimpleBloom<N>`] filter. Consulted
