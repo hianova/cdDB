@@ -13,10 +13,10 @@ use crate::DualCacheFF;
 use crate::core::bloom::SimpleBloom;
 
 use crate::core::column::MultiVectorPointer;
-use crate::core::column::{ColumnArray, Columns};
+use crate::core::column::Columns;
 #[cfg(feature = "std")]
 use crate::core::commands::{PartitionCommand, WriteCommand};
-use crate::core::qsbr::{WorkerNode, WorkerState};
+use crate::core::qsbr::WorkerNode;
 use crate::core::rcu::new_atomic_ptr;
 #[cfg(feature = "std")]
 use crate::engine::partition::Partition;

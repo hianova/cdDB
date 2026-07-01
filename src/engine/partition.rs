@@ -39,7 +39,7 @@ impl<const N: usize> BatchMutCache<N> {
     }
 
     fn flush(&mut self, qsbr: &mut QsbrManager) {
-        let str_cache = core::mem::replace(&mut self.str_cache, AHashMap::default());
+        let str_cache = core::mem::take(&mut self.str_cache);
         for (_, (data, wl, col)) in str_cache {
             let old_wl = swap_ptr(&col.waitlist, wl);
             let old_data = swap_ptr(&col.data, data);
@@ -47,7 +47,7 @@ impl<const N: usize> BatchMutCache<N> {
             qsbr.defer_free(old_data);
             col.release_lock();
         }
-        let int_cache = core::mem::replace(&mut self.int_cache, AHashMap::default());
+        let int_cache = core::mem::take(&mut self.int_cache);
         for (_, (data, wl, col)) in int_cache {
             let old_wl = swap_ptr(&col.waitlist, wl);
             let old_data = swap_ptr(&col.data, data);
@@ -55,7 +55,7 @@ impl<const N: usize> BatchMutCache<N> {
             qsbr.defer_free(old_data);
             col.release_lock();
         }
-        let blob_cache = core::mem::replace(&mut self.blob_cache, AHashMap::default());
+        let blob_cache = core::mem::take(&mut self.blob_cache);
         for (_, (data, wl, col)) in blob_cache {
             let old_wl = swap_ptr(&col.waitlist, wl);
             let old_data = swap_ptr(&col.data, data);

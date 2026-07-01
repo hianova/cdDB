@@ -192,7 +192,7 @@ impl Storage {
             crate::core::Mutex::new(file_opt)
         };
 
-        let mut s = Self {
+        let s = Self {
             base_path,
             fs,
             disk_index: Arc::new(new_atomic_ptr(AHashMap::default())),

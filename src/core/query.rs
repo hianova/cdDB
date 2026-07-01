@@ -474,10 +474,10 @@ impl<'a, const N: usize> QuerySession<'a, N> {
             let handle = self.route.hot_index.register_thread();
             let _pin = dualcache_ff::core::qsbr::pin(handle.qsbr_node);
 
-            if let Some(_) = self
+            if self
                 .route
                 .hot_index
-                .get(&(self.route.partition_id, entity_id), &handle)
+                .get(&(self.route.partition_id, entity_id), &handle).is_some()
             {
                 let node = self.get_pointer(entity_id)?;
                 let idx = *node.attribute_indices.get(attr)?;
