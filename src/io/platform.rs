@@ -2,6 +2,8 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
+pub use no_std_tool::sync::Backoff;
+
 /// Platform Abstraction Layer (PAL) for all file I/O operations.
 ///
 /// `FileSystem` is the central trait that decouples the database engine from any
@@ -250,64 +252,7 @@ pub struct StdMessageQueue {
         alloc::sync::Arc<crate::core::queue::BoundedQueue<crate::core::commands::PartitionCommand>>,
 }
 
-/// A simple spin-then-yield backoff helper for tight polling loops.
-///
-/// `Backoff` is designed to be used inside loops that must wait for an
-/// external condition (e.g. a queue becoming non-empty) without burning
-/// excessive CPU. It first executes a configurable number of CPU spin-loop
-/// hints, then signals via [`is_completed`][Self::is_completed] that the caller
-/// should switch to yielding the OS scheduler.
-///
-/// # Examples
-///
-/// ```rust
-/// use cddb::platform::Backoff;
-///
-/// let mut backoff = Backoff::new();
-/// loop {
-///     // ... check condition ...
-///     if backoff.is_completed() {
-///         std::thread::yield_now();
-///     } else {
-///         backoff.snooze();
-///     }
-/// }
-/// ```
-pub struct Backoff {
-    spins: u32,
-}
 
-impl Default for Backoff {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Backoff {
-    /// Creates a new `Backoff` with the spin counter reset to zero.
-    pub fn new() -> Self {
-        Self { spins: 0 }
-    }
-
-    /// Emits a CPU spin-loop hint and increments the internal spin counter.
-    ///
-    /// Call this inside a polling loop. After enough calls the internal counter
-    /// will exceed the spin budget and [`is_completed`][Self::is_completed] will
-    /// return `true`, signalling that the caller should switch to a cheaper
-    /// blocking strategy (e.g. `thread::yield_now`).
-    pub fn snooze(&mut self) {
-        core::hint::spin_loop();
-        self.spins += 1;
-    }
-
-    /// Returns `true` when the spin budget has been exhausted.
-    ///
-    /// Once this returns `true` the caller should stop spinning and instead
-    /// yield or block the thread to avoid wasting CPU cycles.
-    pub fn is_completed(&self) -> bool {
-        self.spins > 100
-    }
-}
 
 #[cfg(feature = "std")]
 impl MessageQueue for StdMessageQueue {
@@ -469,15 +414,6 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn test_backoff() {
-        let mut backoff = Backoff::default();
-        assert!(!backoff.is_completed());
-        for _ in 0..101 {
-            backoff.snooze();
-        }
-        assert!(backoff.is_completed());
-    }
 
     #[test]
     fn test_filesystem_default_impls() {

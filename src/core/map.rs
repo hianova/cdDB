@@ -1,4 +1,4 @@
-use ahash::RandomState;
+use no_std_tool::collections::ahash::RandomState;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, Hash};

@@ -1,4 +1,4 @@
-use ahash::RandomState;
+use no_std_tool::collections::ahash::RandomState;
 use core::hash::Hash;
 
 use crate::core::atomic::{AtomicUsize, Ordering};
