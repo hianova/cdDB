@@ -8,7 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::DualCacheFF;
-use crate::core::bloom::SimpleBloom;
+use no_std_tool::collections::SimpleBloom;
 
 use crate::core::column::Columns;
 use crate::core::commands::{Attributes, PartitionCommand, WriteCommand};
@@ -91,7 +91,7 @@ pub struct Partition<const N: usize> {
         DualCacheFF<
             (u32, usize),
             (),
-            dualcache_ff::core::DefaultExponentialPolicy,
+            dualcache_ff::componant::config::DefaultExponentialPolicy,
             64,
             4096,
             262144,
@@ -145,7 +145,7 @@ impl<const N: usize> Partition<N> {
             DualCacheFF<
                 (u32, usize),
                 (),
-                dualcache_ff::core::DefaultExponentialPolicy,
+                dualcache_ff::componant::config::DefaultExponentialPolicy,
                 64,
                 4096,
                 262144,
@@ -647,24 +647,24 @@ impl<const N: usize> Partition<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::bloom::SimpleBloom;
+    use no_std_tool::collections::SimpleBloom;
     use crate::core::rcu::new_atomic_ptr;
     use crate::engine::partition::WorkerNode;
     use crate::io::wal::NoopWal;
 
     #[test]
     fn test_partition_apply_commands() {
-        let columns = Arc::new(new_atomic_ptr(crate::core::column::Columns::<512>::new()));
+        let columns = Arc::new(new_atomic_ptr(crate::core::column::Columns::<262144>::new()));
         let wal = Arc::new(NoopWal);
         let workers = Arc::new(new_atomic_ptr(WorkerNode {
             worker: Arc::new(crate::core::qsbr::WorkerState::default()),
             next: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
         }));
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
-        let bloom_filter = Arc::new(new_atomic_ptr(SimpleBloom::<512>::new()));
+        let bloom_filter = Arc::new(new_atomic_ptr(SimpleBloom::<262144>::new()));
         let hot_index = Arc::new(DualCacheFF::new());
 
-        let rx = Arc::new(crate::core::queue::BoundedQueue::new(16));
+        let rx = Arc::new(no_std_tool::collections::BoundedQueue::new());
         let mut partition = Partition::new(
             alloc::boxed::Box::new(crate::io::platform::StdMessageQueue { rx }),
             columns.clone(),
@@ -720,7 +720,7 @@ mod tests {
             attributes_int: attrs_int,
             attributes_blob: attrs_blob,
         };
-        let mut cache = BatchMutCache::<512>::new();
+        let mut cache = BatchMutCache::<262144>::new();
         partition.process_promote(&mut ptr_map, &mut cache, entity_data);
         cache.flush(&mut partition.qsbr);
 

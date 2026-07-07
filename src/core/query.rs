@@ -1,11 +1,11 @@
 use crate::core::AHashMap;
-use crate::core::bloom::SimpleBloom;
+use no_std_tool::collections::SimpleBloom;
 use crate::core::column::{ColumnArray, Columns, MultiVectorPointer};
 #[cfg(feature = "std")]
 use crate::core::commands::PartitionCommand;
 use crate::core::qsbr::{WorkerNode, WorkerState};
 #[cfg(feature = "std")]
-use crate::core::queue::BoundedQueue;
+use no_std_tool::collections::BoundedQueue;
 use crate::core::rcu::load_ref;
 use crate::io::storage::Storage;
 use crate::io::wal::WalProvider;
@@ -472,7 +472,7 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         #[cfg(feature = "dualcache-ff")]
         {
             let handle = self.route.hot_index.register_thread();
-            let _pin = dualcache_ff::core::qsbr::pin(handle.qsbr_node);
+            let _pin = dualcache_ff::componant::qsbr::pin(handle.qsbr_node);
 
             if self
                 .route
@@ -627,7 +627,7 @@ pub struct PartitionRoute<const N: usize> {
     /// Write commands are pushed here by [`UserWriter::send`] /
     /// [`UserWriter::try_send`] and drained by the background worker thread.
     #[cfg(feature = "std")]
-    pub writer_tx: Arc<BoundedQueue<PartitionCommand>>,
+    pub writer_tx: Arc<BoundedQueue<PartitionCommand, 262144>>,
     /// Sending end of the partition's command channel (`no_std` build).
     /// The concrete type is provided by the application and must implement
     /// [`MessageSender`](crate::io::platform::MessageSender).
@@ -649,7 +649,7 @@ pub struct PartitionRoute<const N: usize> {
         DualCacheFF<
             (u32, usize),
             (),
-            dualcache_ff::core::DefaultExponentialPolicy,
+            dualcache_ff::componant::config::DefaultExponentialPolicy,
             64,
             4096,
             262144,
@@ -821,7 +821,7 @@ impl<'a, const N: usize> Query<'a, N> {
 mod tests {
     use super::*;
     use crate::core::atomic::AtomicPtr;
-    use crate::core::bloom::SimpleBloom;
+    use no_std_tool::collections::SimpleBloom;
     use crate::core::column::MultiVectorPointer;
     use crate::core::column::{ColumnArray, ColumnData, Columns};
     use crate::core::qsbr::QsbrManager;
@@ -907,7 +907,7 @@ mod tests {
         // DualCacheFF
 
         #[cfg(feature = "std")]
-        let (cache, _daemon) = (crate::DualCacheFF::new(32, 1024), ());
+        let (cache, _daemon) = (crate::DualCacheFF::new(), ());
         #[cfg(not(feature = "std"))]
         let cache = crate::DualCacheFF::new(cache_config);
         let hot_index = Arc::new(cache);
@@ -920,7 +920,7 @@ mod tests {
         Arc::new(PartitionRoute {
             name: "test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(crate::core::queue::BoundedQueue::new(64)),
+            writer_tx: Arc::new(no_std_tool::collections::BoundedQueue::new()),
             columns: columns_ptr,
             shared_pointers,
             hot_index,
@@ -1390,14 +1390,14 @@ mod tests {
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
 
         #[cfg(feature = "std")]
-        let (cache, _daemon) = (crate::DualCacheFF::new(32, 1024), ());
+        let (cache, _daemon) = (crate::DualCacheFF::new(), ());
         #[cfg(not(feature = "std"))]
         let cache = crate::DualCacheFF::new(cache_config);
 
         let route = Arc::new(PartitionRoute {
             name: "link_test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(crate::core::queue::BoundedQueue::new(64)),
+            writer_tx: Arc::new(no_std_tool::collections::BoundedQueue::new()),
             columns: columns_ptr,
             shared_pointers,
             hot_index: Arc::new(cache),
@@ -1536,14 +1536,14 @@ mod tests {
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
 
         #[cfg(feature = "std")]
-        let (cache, _daemon) = (crate::DualCacheFF::new(32, 1024), ());
+        let (cache, _daemon) = (crate::DualCacheFF::new(), ());
         #[cfg(not(feature = "std"))]
         let cache = crate::DualCacheFF::new(cache_config);
 
         let route = Arc::new(PartitionRoute {
             name: "signed_test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(crate::core::queue::BoundedQueue::new(64)),
+            writer_tx: Arc::new(no_std_tool::collections::BoundedQueue::new()),
             columns: columns_ptr,
             shared_pointers,
             hot_index: Arc::new(cache),

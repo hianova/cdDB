@@ -7,10 +7,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
-use crate::core::queue::BoundedQueue;
+use no_std_tool::collections::BoundedQueue;
 
 use crate::DualCacheFF;
-use crate::core::bloom::SimpleBloom;
+use no_std_tool::collections::SimpleBloom;
 
 use crate::core::column::MultiVectorPointer;
 use crate::core::column::Columns;
@@ -138,7 +138,7 @@ pub struct CdDBDispatcher<const N: usize> {
         DualCacheFF<
             (u32, usize),
             (),
-            dualcache_ff::core::DefaultExponentialPolicy,
+            dualcache_ff::componant::config::DefaultExponentialPolicy,
             64,
             4096,
             262144,
@@ -184,7 +184,7 @@ impl<const N: usize> CdDBDispatcher<N> {
     /// use std::sync::Arc;
     /// use cddb::{CdDBDispatcher, platform::{StdFileSystem, StdExecutor}};
     ///
-    /// let db = CdDBDispatcher::<512>::new(
+    /// let db = CdDBDispatcher::<262144>::new(
     ///     Some("./db_data".into()),
     ///     Arc::new(StdFileSystem),
     ///     Arc::new(StdExecutor),
@@ -232,7 +232,7 @@ impl<const N: usize> CdDBDispatcher<N> {
     /// # #[cfg(feature = "std")] {
     /// use cddb::CdDBDispatcher;
     ///
-    /// let db = CdDBDispatcher::<512>::new_std(Some("./db_data".into()));
+    /// let db = CdDBDispatcher::<262144>::new_std(Some("./db_data".into()));
     /// # }
     /// ```
     #[cfg(feature = "std")]
@@ -356,7 +356,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         path: String,
         wal: Arc<dyn WalProvider>,
     ) -> UserWriter {
-        let queue = Arc::new(BoundedQueue::new(262144));
+        let queue = Arc::new(BoundedQueue::new());
         let writer_tx_out = queue.clone();
 
         let partition_id = self.next_partition_id;
@@ -473,7 +473,7 @@ impl<const N: usize> CdDBDispatcher<N> {
     #[cfg(feature = "std")]
     fn spawn_partition_thread(
         &self,
-        rx: Arc<BoundedQueue<PartitionCommand>>,
+        rx: Arc<BoundedQueue<PartitionCommand, 262144>>,
         columns: Arc<AtomicPtr<Columns<N>>>,
         wal: Arc<dyn WalProvider>,
         workers: Arc<AtomicPtr<WorkerNode>>,
@@ -485,7 +485,7 @@ impl<const N: usize> CdDBDispatcher<N> {
             DualCacheFF<
                 (u32, usize),
                 (),
-                dualcache_ff::core::DefaultExponentialPolicy,
+                dualcache_ff::componant::config::DefaultExponentialPolicy,
                 64,
                 4096,
                 262144,
@@ -792,7 +792,7 @@ impl<const N: usize> Default for CdDBDispatcher<N> {
 /// enqueued, causing the partition's background thread to exit cleanly.
 #[cfg(feature = "std")]
 #[derive(Clone)]
-pub struct UserWriter(Arc<BoundedQueue<PartitionCommand>>);
+pub struct UserWriter(Arc<BoundedQueue<PartitionCommand, 262144>>);
 #[cfg(feature = "std")]
 impl UserWriter {
     /// Send a write command to the partition, blocking with exponential backoff
@@ -869,7 +869,7 @@ impl Drop for UserWriter {
 mod tests {
     use super::*;
     use crate::core::commands::WriteCommand;
-    use crate::core::queue::BoundedQueue;
+    use no_std_tool::collections::BoundedQueue;
     use alloc::string::ToString;
     use alloc::sync::Arc;
     use alloc::vec;
@@ -887,16 +887,12 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn test_user_writer_try_send_full_and_drop() {
-        let q = Arc::new(BoundedQueue::new(2));
+        let q = Arc::new(BoundedQueue::new());
         let writer = UserWriter(q.clone());
-        let cmd1 = WriteCommand::Delete { entity_id: 1 };
-        assert!(writer.try_send(cmd1.clone()).is_ok());
-
-        let cmd2 = WriteCommand::Delete { entity_id: 2 };
-        assert!(writer.try_send(cmd2.clone()).is_ok());
-
-        let cmd3 = WriteCommand::Delete { entity_id: 3 };
-        assert!(writer.try_send(cmd3.clone()).is_err()); // queue is full
+        let mut i = 1;
+        while writer.try_send(WriteCommand::Delete { entity_id: i }).is_ok() {
+            i += 1;
+        }
 
         drop(writer); // shouldn't block indefinitely
     }
@@ -904,7 +900,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn test_user_writer_send_backoff() {
-        let q = Arc::new(BoundedQueue::new(1));
+        let q = Arc::new(BoundedQueue::new());
         let writer = UserWriter(q.clone());
 
         let cmd1 = WriteCommand::Delete { entity_id: 1 };
@@ -931,10 +927,10 @@ mod tests {
         ));
         let ptrs = Arc::new(crate::core::rcu::new_atomic_ptr(crate::AHashMap::default()));
         let bloom = Arc::new(crate::core::rcu::new_atomic_ptr(
-            crate::core::bloom::SimpleBloom::<1024>::new(),
+            no_std_tool::collections::SimpleBloom::<1024>::new(),
         ));
 
-        let (cache, _) = (crate::DualCacheFF::new(32, 1024), ());
+        let (cache, _) = (crate::DualCacheFF::new(), ());
 
         let path = "/tmp/test_route".to_string();
         let _ = std::fs::remove_dir_all(&path);
@@ -949,7 +945,7 @@ mod tests {
         let route = PartitionRoute {
             name: "test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(BoundedQueue::new(1)),
+            writer_tx: Arc::new(BoundedQueue::new()),
             columns: cols,
             shared_pointers: ptrs,
             hot_index: Arc::new(cache),

@@ -249,7 +249,7 @@ pub trait MessageQueue: Send + Sync {
 pub struct StdMessageQueue {
     /// The shared bounded queue from which commands are consumed.
     pub rx:
-        alloc::sync::Arc<crate::core::queue::BoundedQueue<crate::core::commands::PartitionCommand>>,
+        alloc::sync::Arc<no_std_tool::collections::BoundedQueue<crate::core::commands::PartitionCommand, 262144>>,
 }
 
 
@@ -277,7 +277,11 @@ impl MessageQueue for StdMessageQueue {
 #[cfg(feature = "std")]
 impl Executor for StdExecutor {
     fn spawn_task(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>) {
-        std::thread::spawn(f);
+        std::thread::Builder::new()
+            .name("cddb_partition_executor".to_string())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(f)
+            .expect("Failed to spawn partition thread");
     }
 }
 
@@ -342,7 +346,7 @@ pub trait MessageSender: Send + Sync {
 pub struct StdMessageSender {
     /// The shared bounded queue into which commands are pushed.
     pub tx:
-        alloc::sync::Arc<crate::core::queue::BoundedQueue<crate::core::commands::PartitionCommand>>,
+        alloc::sync::Arc<no_std_tool::collections::BoundedQueue<crate::core::commands::PartitionCommand, 262144>>,
 }
 
 #[cfg(feature = "std")]
@@ -397,7 +401,7 @@ mod tests {
     #[test]
     fn test_std_executor_and_queue() {
         let exec = StdExecutor;
-        let q = alloc::sync::Arc::new(crate::core::queue::BoundedQueue::new(16));
+        let q = alloc::sync::Arc::new(no_std_tool::collections::BoundedQueue::new());
         let mq = StdMessageQueue { rx: q.clone() };
         let ms = StdMessageSender { tx: q };
 
@@ -461,7 +465,7 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn test_std_message_sender_backoff() {
-        let q = alloc::sync::Arc::new(crate::core::queue::BoundedQueue::new(1));
+        let q = alloc::sync::Arc::new(no_std_tool::collections::BoundedQueue::new());
         let ms = StdMessageSender { tx: q.clone() };
 
         ms.tx

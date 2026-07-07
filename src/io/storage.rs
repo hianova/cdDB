@@ -141,7 +141,7 @@ pub struct Storage {
     #[cfg(feature = "std")]
     pub next_disk_index: std::sync::Mutex<AHashMap<usize, (u64, u32)>>,
     #[cfg(not(feature = "std"))]
-    pub next_disk_index: spin::Mutex<AHashMap<usize, (u64, u32)>>,
+    pub next_disk_index: no_std_tool::sync::SpinMutex<AHashMap<usize, (u64, u32)>>,
     /// Tracks whether next_disk_index has been modified since the last swap
     pub disk_index_dirty: AtomicBool,
     /// The byte offset at which the *next* record will be appended.
@@ -199,7 +199,7 @@ impl Storage {
             #[cfg(feature = "std")]
             next_disk_index: std::sync::Mutex::new(AHashMap::default()),
             #[cfg(not(feature = "std"))]
-            next_disk_index: spin::Mutex::new(AHashMap::default()),
+            next_disk_index: no_std_tool::sync::SpinMutex::new(AHashMap::default()),
             disk_index_dirty: AtomicBool::new(false),
             current_offset: crate::core::Mutex::new(0),
             #[cfg(feature = "std")]
@@ -241,9 +241,9 @@ impl Storage {
             }
             #[cfg(not(feature = "std"))]
             {
-                let mut index = self.next_disk_index.lock();
+                let mut index = self.next_disk_index.lock().unwrap();
                 *index = map;
-                let mut off = self.current_offset.lock();
+                let mut off = self.current_offset.lock().unwrap();
                 *off = pos as u64;
             }
             self.swap_disk_index();
@@ -300,7 +300,7 @@ impl Storage {
         #[cfg(feature = "std")]
         let next = self.next_disk_index.lock().unwrap().clone();
         #[cfg(not(feature = "std"))]
-        let next = self.next_disk_index.lock().clone();
+        let next = self.next_disk_index.lock().unwrap().clone();
 
         crate::core::rcu::swap_ptr(&self.disk_index, next)
     }
@@ -353,7 +353,7 @@ impl Storage {
                 #[cfg(feature = "std")]
                 let mut index = self.next_disk_index.lock().unwrap();
                 #[cfg(not(feature = "std"))]
-                let mut index = self.next_disk_index.lock();
+                let mut index = self.next_disk_index.lock().unwrap();
                 index.insert(data.entity_id, (offset, bytes.len() as u32));
                 self.disk_index_dirty.store(true, Ordering::Release);
                 return Ok(());
@@ -364,7 +364,7 @@ impl Storage {
             #[cfg(feature = "std")]
             let mut index = self.next_disk_index.lock().unwrap();
             #[cfg(not(feature = "std"))]
-            let mut index = self.next_disk_index.lock();
+            let mut index = self.next_disk_index.lock().unwrap();
             index.insert(data.entity_id, (offset, bytes.len() as u32));
             self.disk_index_dirty.store(true, Ordering::Release);
             Ok(())
@@ -372,12 +372,12 @@ impl Storage {
 
         #[cfg(not(feature = "std"))]
         {
-            let mut off_lock = self.current_offset.lock();
+            let mut off_lock = self.current_offset.lock().unwrap();
             let offset = *off_lock;
 
             self.fs.append(&path, &record)?;
             *off_lock = offset + record.len() as u64;
-            let mut index = self.next_disk_index.lock();
+            let mut index = self.next_disk_index.lock().unwrap();
             index.insert(data.entity_id, (offset, bytes.len() as u32));
             self.disk_index_dirty.store(true, Ordering::Release);
             Ok(())

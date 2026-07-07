@@ -1,9 +1,7 @@
-pub mod bloom;
 pub mod column;
 pub mod commands;
 pub mod qsbr;
 pub mod query;
-pub mod queue;
 
 #[cfg(feature = "std")]
 pub mod r#std;
