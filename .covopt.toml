@@ -1,0 +1,9 @@
+[[target]]
+test = "test_ahashmap_all_apis"
+expected = "O(1)"
+n_values = "10,20,50"
+target_file = "src/core/map.rs"
+target_line = 68
+require_cache_padding = false
+require_branch_hints = false
+require_aerospace_grade = false

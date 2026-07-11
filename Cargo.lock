@@ -120,6 +120,8 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 [[package]]
 name = "dualcache-ff"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef2a898903a7b2636adf36dad57b93c5a700fb4cb0fd763a78bd00b7d96cdaf4"
 dependencies = [
  "ahash",
  "no_std_tool",
@@ -275,7 +277,9 @@ dependencies = [
 
 [[package]]
 name = "no_std_tool"
-version = "0.1.0"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7b0a099eae4e6581c7021efd80a5c09d2f6efd983011a006a6813b78c8b4ff8"
 dependencies = [
  "ahash",
  "hashbrown",
@@ -287,7 +291,9 @@ dependencies = [
 
 [[package]]
 name = "no_std_tool_macros"
-version = "0.1.0"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6386816f75dffb1661075d143a68df1831807e3255b3aba8ff55bc03c8d9284d"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -119,6 +119,8 @@ pub use core::column::MultiVectorPointer;
 pub use core::query::PartitionRoute;
 #[cfg(feature = "std")]
 pub use engine::facade::{CdDBBlobStore, CdDBPartition, CdDBStore, CdDBStrStore};
+#[cfg(feature = "std")]
+pub use engine::simple_kv::SimpleKvStore;
 
 pub use io::platform::FileSystem;
 pub use io::storage::{EntityData, Storage};
@@ -127,6 +129,23 @@ pub use io::wal::{
 };
 
 pub use crate::core::AHashMap;
+
+/// Configuration for the cache subsystem.
+#[derive(Debug, Clone, Copy)]
+pub struct CacheConfig {
+    pub daemon_mode: bool,
+    pub cata_tuning: bool,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            daemon_mode: true,
+            cata_tuning: false,
+        }
+    }
+}
+
 
 #[cfg(not(feature = "dualcache-ff"))]
 mod dualcache_stub {
@@ -155,7 +174,7 @@ mod dualcache_stub {
     impl<K, V, P, const C2: usize, const C1: usize, const C0: usize, const TC: usize>
         DualCacheFF<K, V, P, C2, C1, C0, TC>
     {
-        pub fn new(_config: ()) -> Self {
+        pub fn new(_config: crate::CacheConfig) -> Self {
             Self {
                 _marker: core::marker::PhantomData,
             }

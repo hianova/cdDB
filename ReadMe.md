@@ -40,7 +40,7 @@ use cdDB::{CdDBDispatcher, WriteCommand, Query, Attributes};
 
 fn main() {
     // Initialize the dispatcher with a base path for persistence
-    let mut db = CdDBDispatcher::<1048576>::new_std(Some("data_dir".into()));
+    let mut db = CdDBDispatcher::<1048576>::new_std(Some("data_dir".into()), cdDB::CacheConfig::default());
     
     // Register a partition (spawns a native worker thread)
     let tx = db.register_partition("users.active".to_string());

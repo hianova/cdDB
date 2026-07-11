@@ -34,7 +34,7 @@ fn run_workload(pattern: AccessPattern, read_ratio_percent: u8) -> BenchResult {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().to_path_buf().to_string_lossy().into_owned();
 
-    let mut db = CdDBDispatcher::<512>::new_std(Some(path.clone()));
+    let mut db = CdDBDispatcher::<512>::new_std(Some(path.clone()), cdDB::CacheConfig::default());
     let writer =
         db.register_partition_with_wal_provider("bench_partition".to_string(), Arc::new(NoopWal));
     let route = db.get_route("bench_partition").unwrap();
@@ -144,7 +144,7 @@ fn main() {
     // macOS default stack size is too small for 8MB DualCacheFF initialization.
     // Spawn a thread with 32MB stack to run the benchmark.
     std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(128 * 1024 * 1024)
         .spawn(|| {
             println!("# cdDB High-Performance Benchmark");
             println!("* **Threads**: {}", THREAD_COUNT);

@@ -160,6 +160,7 @@ pub enum WriteCommand {
     /// Batch insert multiple standard entities in a single WAL record.
     ///
     /// Each tuple contains `(entity_id, string_attrs, int_attrs, blob_attrs)`.
+    #[allow(clippy::type_complexity)]
     BatchInsert(
         Vec<(
             usize,
