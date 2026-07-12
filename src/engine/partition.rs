@@ -236,19 +236,32 @@ impl<const N: usize> Partition<N> {
     /// storage compaction every 300 seconds.
     pub fn run(mut self) {
         #[cfg(feature = "std")]
-        {
+        let shutdown_flag = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+
+        #[cfg(feature = "std")]
+        let compaction_thread = {
+            let shutdown_flag_clone = shutdown_flag.clone();
             let storage_clone = Arc::downgrade(&self.storage);
             std::thread::spawn(move || {
+                let (lock, cvar) = &*shutdown_flag_clone;
                 loop {
-                    std::thread::sleep(std::time::Duration::from_secs(300));
+                    let mut shutdown = lock.lock().unwrap();
+                    let result = cvar
+                        .wait_timeout(shutdown, std::time::Duration::from_secs(300))
+                        .unwrap();
+                    shutdown = result.0;
+                    if *shutdown || storage_clone.strong_count() == 0 {
+                        break;
+                    }
+                    drop(shutdown);
                     if let Some(s) = storage_clone.upgrade() {
                         let _ = s.compact();
                     } else {
                         break;
                     }
                 }
-            });
-        }
+            })
+        };
 
         loop {
             let cmd_res = self.writer_rx.recv();
@@ -284,6 +297,14 @@ impl<const N: usize> Partition<N> {
             self.apply_batch_commands(commands);
             let _ = self.storage.flush();
             self.qsbr.maintenance();
+        }
+
+        #[cfg(feature = "std")]
+        {
+            let (lock, cvar) = &*shutdown_flag;
+            *lock.lock().unwrap() = true;
+            cvar.notify_one();
+            let _ = compaction_thread.join();
         }
     }
 

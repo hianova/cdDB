@@ -690,6 +690,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")]
     fn test_partition_command_debug() {
         let cmd = PartitionCommand::Shutdown;
         let s = format!("{:?}", cmd);

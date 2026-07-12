@@ -67,9 +67,9 @@ fn run_workload(pattern: AccessPattern, read_ratio_percent: u8) -> BenchResult {
     thread::scope(|s| {
         let mut handles = vec![];
 
-        for thread_id in 0..THREAD_COUNT {
+        for item in all_ops_data.iter().take(THREAD_COUNT) {
             let barrier_clone = barrier.clone();
-            let ops_data = all_ops_data[thread_id].clone();
+            let ops_data = item.clone();
             let writer_clone = writer.clone();
             let route_ref = &route;
 

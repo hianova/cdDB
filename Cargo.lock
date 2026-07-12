@@ -47,7 +47,7 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cdDB"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "crc32fast",
  "crossbeam-utils",
@@ -119,9 +119,9 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "dualcache-ff"
-version = "1.0.0"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef2a898903a7b2636adf36dad57b93c5a700fb4cb0fd763a78bd00b7d96cdaf4"
+checksum = "694cb32271338d37fa09119525a194ff77d863ecb7f58dc384eb102f2a5c7bdb"
 dependencies = [
  "ahash",
  "no_std_tool",

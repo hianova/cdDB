@@ -147,7 +147,7 @@ impl Default for CacheConfig {
 }
 
 
-#[cfg(not(feature = "dualcache-ff"))]
+#[cfg(any(not(feature = "dualcache-ff"), not(feature = "std")))]
 mod dualcache_stub {
     #[derive(Clone, Debug)]
     pub struct DualCacheFF<
@@ -158,21 +158,54 @@ mod dualcache_stub {
         const C1: usize,
         const C0: usize,
         const TC: usize,
+        const P4: usize = 0,
+        const P5: usize = 0,
+        const P6: usize = 0,
     > {
         _marker: core::marker::PhantomData<(K, V, P)>,
     }
 
-    unsafe impl<K, V, P, const C2: usize, const C1: usize, const C0: usize, const TC: usize> Send
-        for DualCacheFF<K, V, P, C2, C1, C0, TC>
+    unsafe impl<
+        K,
+        V,
+        P,
+        const C2: usize,
+        const C1: usize,
+        const C0: usize,
+        const TC: usize,
+        const P4: usize,
+        const P5: usize,
+        const P6: usize,
+    > Send for DualCacheFF<K, V, P, C2, C1, C0, TC, P4, P5, P6>
     {
     }
-    unsafe impl<K, V, P, const C2: usize, const C1: usize, const C0: usize, const TC: usize> Sync
-        for DualCacheFF<K, V, P, C2, C1, C0, TC>
+    unsafe impl<
+        K,
+        V,
+        P,
+        const C2: usize,
+        const C1: usize,
+        const C0: usize,
+        const TC: usize,
+        const P4: usize,
+        const P5: usize,
+        const P6: usize,
+    > Sync for DualCacheFF<K, V, P, C2, C1, C0, TC, P4, P5, P6>
     {
     }
 
-    impl<K, V, P, const C2: usize, const C1: usize, const C0: usize, const TC: usize>
-        DualCacheFF<K, V, P, C2, C1, C0, TC>
+    impl<
+        K,
+        V,
+        P,
+        const C2: usize,
+        const C1: usize,
+        const C0: usize,
+        const TC: usize,
+        const P4: usize,
+        const P5: usize,
+        const P6: usize,
+    > DualCacheFF<K, V, P, C2, C1, C0, TC, P4, P5, P6>
     {
         pub fn new(_config: crate::CacheConfig) -> Self {
             Self {
@@ -182,16 +215,11 @@ mod dualcache_stub {
     }
 }
 
-#[cfg(feature = "dualcache-ff")]
-#[cfg(feature = "std")]
+#[cfg(all(feature = "dualcache-ff", feature = "std"))]
 pub use dualcache_ff::DualCacheFF;
 
 #[cfg(feature = "dualcache-ff")]
 pub use dualcache_ff;
 
-#[cfg(feature = "dualcache-ff")]
-#[cfg(not(feature = "std"))]
-pub use dualcache_ff::DualCacheFF;
-
-#[cfg(not(feature = "dualcache-ff"))]
+#[cfg(any(not(feature = "dualcache-ff"), not(feature = "std")))]
 pub use dualcache_stub::DualCacheFF;

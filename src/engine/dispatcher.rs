@@ -158,6 +158,8 @@ pub struct CdDBDispatcher<const N: usize> {
     /// Background maintenance threads observe this flag to enter low-power
     /// idle polling rather than being fully terminated.
     pub is_sleeping: Arc<core::sync::atomic::AtomicBool>,
+    #[cfg(feature = "std")]
+    pub partition_threads: Vec<crate::io::platform::TaskHandle>,
 }
 
 impl<const N: usize> CdDBDispatcher<N> {
@@ -227,6 +229,8 @@ impl<const N: usize> CdDBDispatcher<N> {
             global_cache,
             next_partition_id: 0,
             is_sleeping: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            #[cfg(feature = "std")]
+            partition_threads: Vec::new(),
         }
     }
 
@@ -395,7 +399,7 @@ impl<const N: usize> CdDBDispatcher<N> {
 
         self.route_table.insert(path.clone(), route);
 
-        self.spawn_partition_thread(
+        let handle = self.spawn_partition_thread(
             queue,
             columns,
             wal,
@@ -406,6 +410,7 @@ impl<const N: usize> CdDBDispatcher<N> {
             partition_id,
             self.global_cache.clone(),
         );
+        self.partition_threads.push(handle);
 
         UserWriter(writer_tx_out)
     }
@@ -513,7 +518,7 @@ impl<const N: usize> CdDBDispatcher<N> {
                 64,
             >,
         >,
-    ) {
+    ) -> crate::io::platform::TaskHandle {
         let fs_rt = self.fs.clone();
         let wal_rt = wal.clone();
 
@@ -533,7 +538,7 @@ impl<const N: usize> CdDBDispatcher<N> {
 
             partition.replay_wal();
             partition.run();
-        }));
+        }))
     }
 
     pub fn get_route(&self, partition_name: &str) -> Option<Arc<PartitionRoute<N>>> {
@@ -785,6 +790,28 @@ impl<const N: usize> CdDBDispatcher<N> {
 
 impl<const N: usize> Drop for CdDBDispatcher<N> {
     fn drop(&mut self) {
+        #[cfg(feature = "std")]
+        {
+            // Send Shutdown command to all partition queues.
+            for route in self.route_table.values() {
+                let mut retries = 0;
+                let mut backoff = crate::io::platform::Backoff::new();
+                while route.writer_tx.push(PartitionCommand::Shutdown).is_err() && retries < 1000 {
+                    retries += 1;
+                    if backoff.is_completed() {
+                        std::thread::yield_now();
+                    } else {
+                        backoff.snooze();
+                    }
+                }
+            }
+
+            // Wait (join) for all partition background threads to exit.
+            for handle in self.partition_threads.drain(..) {
+                let _ = handle.join();
+            }
+        }
+
         #[cfg(feature = "dualcache-ff")]
         {
             let cache_ptr = alloc::sync::Arc::as_ptr(&self.global_cache);
@@ -881,14 +908,20 @@ impl Drop for UserWriter {
     fn drop(&mut self) {
         // Send shutdown command on drop to gracefully terminate the background partition thread
         let mut retries = 0;
-        while self.0.push(PartitionCommand::Shutdown).is_err() && retries < 100 {
+        let mut backoff = crate::io::platform::Backoff::new();
+        while self.0.push(PartitionCommand::Shutdown).is_err() && retries < 1000 {
             retries += 1;
+            if backoff.is_completed() {
+                std::thread::yield_now();
+            } else {
+                backoff.snooze();
+            }
         }
     }
 }
 
-/// Shared read context for a single partition, used to route queries and
-/// write commands.
+// Shared read context for a single partition, used to route queries and
+// write commands.
 // PartitionRoute has been moved to src/core/query.rs
 
 #[cfg(test)]
@@ -902,7 +935,6 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
     #[ignore]
     fn test_dispatcher_register_with_budget() {
         let mut d = CdDBDispatcher::<1024>::new_std(None, crate::CacheConfig::default());

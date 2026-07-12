@@ -13,8 +13,8 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicPtr;
-#[cfg(feature = "dualcache-ff")]
-use dualcache_ff::DualCacheFF;
+#[cfg(all(feature = "dualcache-ff", feature = "std"))]
+use crate::DualCacheFF;
 
 /// A single logical operation within a query plan.
 ///
@@ -475,7 +475,7 @@ impl<'a, const N: usize> QuerySession<'a, N> {
 
     /// Fetch a string attribute for an entity.
     pub fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
-        #[cfg(feature = "dualcache-ff")]
+        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
         {
             let handle = self.route.hot_index.register_thread();
             let _pin = dualcache_ff::componant::qsbr::pin(handle.qsbr_node);
@@ -650,7 +650,7 @@ pub struct PartitionRoute<const N: usize> {
     /// Reference to the global [`DualCacheFF`] hot-index shared by all
     /// partitions. Keyed by `(partition_id, entity_id)` so that cache
     /// eviction decisions span the full working set.
-    #[cfg(feature = "dualcache-ff")]
+    #[cfg(all(feature = "dualcache-ff", feature = "std"))]
     pub hot_index: Arc<
         DualCacheFF<
             (u32, usize),
@@ -912,9 +912,9 @@ mod tests {
 
         // DualCacheFF
 
-        #[cfg(feature = "dualcache-ff")]
+        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
         let cache = crate::DualCacheFF::new(dualcache_ff::componant::policy::DefaultEvictionPolicy::new());
-        #[cfg(not(feature = "dualcache-ff"))]
+        #[cfg(not(all(feature = "dualcache-ff", feature = "std")))]
         let cache = crate::DualCacheFF::new(crate::CacheConfig::default());
         let hot_index = Arc::new(cache);
 
@@ -1416,9 +1416,9 @@ mod tests {
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
 
-        #[cfg(feature = "dualcache-ff")]
+        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
         let cache = crate::DualCacheFF::new(dualcache_ff::componant::policy::DefaultEvictionPolicy::new());
-        #[cfg(not(feature = "dualcache-ff"))]
+        #[cfg(not(all(feature = "dualcache-ff", feature = "std")))]
         let cache = crate::DualCacheFF::new(crate::CacheConfig::default());
 
         let route = Arc::new(PartitionRoute {
@@ -1567,9 +1567,9 @@ mod tests {
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
 
-        #[cfg(feature = "dualcache-ff")]
+        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
         let cache = crate::DualCacheFF::new(dualcache_ff::componant::policy::DefaultEvictionPolicy::new());
-        #[cfg(not(feature = "dualcache-ff"))]
+        #[cfg(not(all(feature = "dualcache-ff", feature = "std")))]
         let cache = crate::DualCacheFF::new(crate::CacheConfig::default());
 
         let route = Arc::new(PartitionRoute {
@@ -1603,7 +1603,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     #[ignore]
     fn test_query_execute_batch_multiple_nodes() {
         let route = make_test_route();

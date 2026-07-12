@@ -97,7 +97,6 @@ mod tests {
 
     #[test]
     #[ignore]
-    #[ignore]
     fn test_simple_kv_store() {
         let store = SimpleKvStore::open("/tmp/cddb_test_simple_kv");
         

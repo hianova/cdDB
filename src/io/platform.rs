@@ -121,6 +121,25 @@ pub trait FileSystem: Send + Sync {
 ///
 /// Implementations must be both `Send` and `Sync` so that a single shared
 /// reference can be used across threads.
+/// A handle to a spawned background task/thread.
+#[cfg(feature = "std")]
+pub struct TaskHandle(pub std::thread::JoinHandle<()>);
+
+#[cfg(not(feature = "std"))]
+pub struct TaskHandle;
+
+impl TaskHandle {
+    #[cfg(feature = "std")]
+    pub fn join(self) -> Result<(), String> {
+        self.0.join().map_err(|_| "Thread panicked".to_string())
+    }
+
+    #[cfg(not(feature = "std"))]
+    pub fn join(self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 pub trait Executor: Send + Sync {
     /// Spawns `f` as an independent, fire-and-forget task.
     ///
@@ -132,7 +151,7 @@ pub trait Executor: Send + Sync {
     ///
     /// May panic (or silently fail, depending on the implementation) if the
     /// underlying runtime has been shut down or has reached its task limit.
-    fn spawn_task(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>);
+    fn spawn_task(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>) -> TaskHandle;
 }
 
 /// Standard-library backed [`FileSystem`] implementation.
@@ -276,12 +295,13 @@ impl MessageQueue for StdMessageQueue {
 
 #[cfg(feature = "std")]
 impl Executor for StdExecutor {
-    fn spawn_task(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>) {
-        std::thread::Builder::new()
+    fn spawn_task(&self, f: alloc::boxed::Box<dyn FnOnce() + Send + 'static>) -> TaskHandle {
+        let handle = std::thread::Builder::new()
             .name("cddb_partition_executor".to_string())
             .stack_size(32 * 1024 * 1024)
             .spawn(f)
             .expect("Failed to spawn partition thread");
+        TaskHandle(handle)
     }
 }
 
