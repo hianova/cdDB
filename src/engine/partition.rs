@@ -91,14 +91,10 @@ pub struct Partition<const N: usize> {
         DualCacheFF<
             (u32, usize),
             (),
-            dualcache_ff::componant::config::DefaultExponentialPolicy,
             64,
             4096,
             262144,
             266304,
-            16,
-            1024,
-            64,
         >,
     >, // Just for heat tracking
     /// The unique numeric ID of this partition.
@@ -146,14 +142,10 @@ impl<const N: usize> Partition<N> {
             DualCacheFF<
                 (u32, usize),
                 (),
-                dualcache_ff::componant::config::DefaultExponentialPolicy,
                 64,
                 4096,
                 262144,
                 266304,
-                16,
-                1024,
-                64,
             >,
         >,
         partition_id: u32,
@@ -686,9 +678,9 @@ mod tests {
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
         let bloom_filter = Arc::new(new_atomic_ptr(SimpleBloom::<262144>::new()));
         #[cfg(feature = "dualcache-ff")]
-        let hot_index = Arc::new(DualCacheFF::new(dualcache_ff::componant::policy::DefaultEvictionPolicy::new()));
+        let hot_index = Arc::new(DualCacheFF::new());
         #[cfg(not(feature = "dualcache-ff"))]
-        let hot_index = Arc::new(DualCacheFF::new(crate::CacheConfig::default()));
+        let hot_index = Arc::new(DualCacheFF::new());
 
         let rx = Arc::new(no_std_tool::collections::BoundedQueue::new());
         let mut partition = Partition::new(

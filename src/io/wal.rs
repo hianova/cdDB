@@ -323,7 +323,7 @@ impl WalProvider for StdWal {
                 return Ok(());
             }
         }
-        self.fs.append(&self.path, &buf)
+        Ok(self.fs.append(&self.path, &buf)?)
     }
 
     /// Appends a batch of [`WriteCommand`]s to the WAL in a single operation.
@@ -376,9 +376,10 @@ impl WalProvider for StdWal {
                     return Ok(());
                 }
             }
-            self.fs.append(&self.path, &buf)?;
+            Ok(self.fs.append(&self.path, &buf)?)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     /// Forces an explicit flush and `sync_data` of all buffered WAL data to disk.
@@ -429,7 +430,7 @@ impl WalProvider for StdWal {
                 let _ = w.flush();
             }
         }
-        self.fs.read(&self.path)
+        Ok(self.fs.read(&self.path)?)
     }
 }
 

@@ -1,9 +1,50 @@
 use alloc::string::String;
 use alloc::string::ToString;
-use alloc::vec::Vec;
+use alloc::vec::Vec;pub use no_std_tool::sync::Backoff;
 
-pub use no_std_tool::sync::Backoff;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IoError {
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    Other(&'static str),
+}
 
+#[cfg(feature = "std")]
+impl From<std::io::Error> for IoError {
+    fn from(err: std::io::Error) -> Self {
+        match err.kind() {
+            std::io::ErrorKind::NotFound => IoError::NotFound,
+            std::io::ErrorKind::PermissionDenied => IoError::PermissionDenied,
+            std::io::ErrorKind::AlreadyExists => IoError::AlreadyExists,
+            _ => IoError::Other("IO Error"),
+        }
+    }
+}
+
+impl From<IoError> for alloc::string::String {
+    fn from(err: IoError) -> Self {
+        match err {
+            IoError::NotFound => alloc::string::String::from("NotFound"),
+            IoError::PermissionDenied => alloc::string::String::from("PermissionDenied"),
+            IoError::AlreadyExists => alloc::string::String::from("AlreadyExists"),
+            IoError::Other(msg) => alloc::string::String::from(msg),
+        }
+    }
+}
+
+pub struct NullFileSystem;
+
+impl FileSystem for NullFileSystem {
+    fn write(&self, _path: &str, _data: &[u8]) -> Result<(), IoError> { Ok(()) }
+    fn read(&self, _path: &str) -> Result<Vec<u8>, IoError> { Ok(Vec::new()) }
+    fn append(&self, _path: &str, _data: &[u8]) -> Result<(), IoError> { Ok(()) }
+    fn read_range(&self, _path: &str, _offset: u64, _len: usize) -> Result<Vec<u8>, IoError> { Ok(Vec::new()) }
+    fn file_size(&self, _path: &str) -> Result<u64, IoError> { Ok(0) }
+    fn exists(&self, _path: &str) -> bool { true }
+    fn create_dir_all(&self, _path: &str) -> Result<(), IoError> { Ok(()) }
+    fn read_dir(&self, _path: &str) -> Result<Vec<String>, IoError> { Ok(Vec::new()) }
+}
 /// Platform Abstraction Layer (PAL) for all file I/O operations.
 ///
 /// `FileSystem` is the central trait that decouples the database engine from any
@@ -34,14 +75,14 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Returns an error string if the file cannot be created or written to
     /// (e.g. permission denied, path is a directory).
-    fn write(&self, path: &str, data: &[u8]) -> Result<(), String>;
+    fn write(&self, path: &str, data: &[u8]) -> Result<(), IoError>;
 
     /// Reads the entire contents of the file at `path` into a `Vec<u8>`.
     ///
     /// # Errors
     ///
     /// Returns an error string if the file does not exist or cannot be read.
-    fn read(&self, path: &str) -> Result<Vec<u8>, String>;
+    fn read(&self, path: &str) -> Result<Vec<u8>, IoError>;
 
     /// Appends `data` to the end of the file at `path`, creating it if necessary.
     ///
@@ -50,7 +91,7 @@ pub trait FileSystem: Send + Sync {
     /// # Errors
     ///
     /// Returns an error string if the file cannot be opened or written to.
-    fn append(&self, path: &str, data: &[u8]) -> Result<(), String>;
+    fn append(&self, path: &str, data: &[u8]) -> Result<(), IoError>;
 
     /// Returns `true` if a file or directory exists at `path`.
     fn exists(&self, path: &str) -> bool;
@@ -63,7 +104,7 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Returns an error string if any component of the path cannot be created
     /// (e.g. permission denied).
-    fn create_dir_all(&self, path: &str) -> Result<(), String>;
+    fn create_dir_all(&self, path: &str) -> Result<(), IoError>;
 
     /// Returns the names (not full paths) of all entries inside the directory
     /// at `path`.
@@ -74,7 +115,7 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Returns an error string if `path` does not exist, is not a directory, or
     /// cannot be read.
-    fn read_dir(&self, path: &str) -> Result<Vec<String>, String>;
+    fn read_dir(&self, path: &str) -> Result<Vec<String>, IoError>;
 
     /// Reads exactly `len` bytes from the file at `path`, starting at `offset`.
     ///
@@ -86,13 +127,13 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Returns an error string if the file cannot be read or if
     /// `offset + len` exceeds the file length.
-    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, IoError> {
         let all = self.read(path)?;
         let start = offset as usize;
         if start + len <= all.len() {
             Ok(all[start..start + len].to_vec())
         } else {
-            Err("Read out of bounds".to_string())
+            Err(IoError::Other("Read out of bounds"))
         }
     }
 
@@ -106,7 +147,7 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Returns an error string if the file does not exist or cannot be
     /// accessed.
-    fn file_size(&self, path: &str) -> Result<u64, String> {
+    fn file_size(&self, path: &str) -> Result<u64, IoError> {
         let bytes = self.read(path)?;
         Ok(bytes.len() as u64)
     }
@@ -163,47 +204,47 @@ pub struct StdFileSystem;
 
 #[cfg(feature = "std")]
 impl FileSystem for StdFileSystem {
-    fn write(&self, path: &str, data: &[u8]) -> Result<(), String> {
+    fn write(&self, path: &str, data: &[u8]) -> Result<(), IoError> {
         use std::io::Write;
-        let mut file = std::fs::File::create(path).map_err(|e: std::io::Error| e.to_string())?;
+        let mut file = std::fs::File::create(path).map_err(Into::<IoError>::into)?;
         file.write_all(data)
-            .map_err(|e: std::io::Error| e.to_string())
+            .map_err(Into::<IoError>::into)
     }
-    fn read(&self, path: &str) -> Result<Vec<u8>, String> {
-        std::fs::read(path).map_err(|e: std::io::Error| e.to_string())
+    fn read(&self, path: &str) -> Result<Vec<u8>, IoError> {
+        std::fs::read(path).map_err(Into::<IoError>::into)
     }
-    fn append(&self, path: &str, data: &[u8]) -> Result<(), String> {
+    fn append(&self, path: &str, data: &[u8]) -> Result<(), IoError> {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
-            .map_err(|e: std::io::Error| e.to_string())?;
+            .map_err(Into::<IoError>::into)?;
         file.write_all(data)
-            .map_err(|e: std::io::Error| e.to_string())
+            .map_err(Into::<IoError>::into)
     }
-    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, String> {
+    fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, IoError> {
         use std::io::{Read, Seek};
-        let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut file = std::fs::File::open(path).map_err(Into::<IoError>::into)?;
         file.seek(std::io::SeekFrom::Start(offset))
-            .map_err(|e| e.to_string())?;
+            .map_err(Into::<IoError>::into)?;
         let mut buf = alloc::vec![0; len];
-        file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+        file.read_exact(&mut buf).map_err(Into::<IoError>::into)?;
         Ok(buf)
     }
-    fn file_size(&self, path: &str) -> Result<u64, String> {
+    fn file_size(&self, path: &str) -> Result<u64, IoError> {
         std::fs::metadata(path)
             .map(|m| m.len())
-            .map_err(|e| e.to_string())
+            .map_err(Into::<IoError>::into)
     }
     fn exists(&self, path: &str) -> bool {
         std::path::Path::new(path).exists()
     }
-    fn create_dir_all(&self, path: &str) -> Result<(), String> {
-        std::fs::create_dir_all(path).map_err(|e: std::io::Error| e.to_string())
+    fn create_dir_all(&self, path: &str) -> Result<(), IoError> {
+        std::fs::create_dir_all(path).map_err(Into::<IoError>::into)
     }
-    fn read_dir(&self, path: &str) -> Result<Vec<String>, String> {
-        let entries = std::fs::read_dir(path).map_err(|e: std::io::Error| e.to_string())?;
+    fn read_dir(&self, path: &str) -> Result<Vec<String>, IoError> {
+        let entries = std::fs::read_dir(path).map_err(Into::<IoError>::into)?;
         let mut names = Vec::new();
         for entry in entries {
             if let Ok(entry) = entry
@@ -389,6 +430,43 @@ impl MessageSender for StdMessageSender {
     }
 }
 
+pub struct SpinMessageQueue {
+    pub rx: alloc::sync::Arc<no_std_tool::sync::SpinMutex<alloc::collections::VecDeque<crate::core::commands::PartitionCommand>>>,
+}
+
+impl MessageQueue for SpinMessageQueue {
+    fn recv(&self) -> Result<crate::core::commands::PartitionCommand, String> {
+        let mut backoff = Backoff::new();
+        loop {
+            if let Some(cmd) = self.rx.lock().unwrap().pop_front() {
+                return Ok(cmd);
+            }
+            if backoff.is_completed() {
+                #[cfg(feature = "std")]
+                std::thread::yield_now();
+                #[cfg(not(feature = "std"))]
+                core::hint::spin_loop();
+            } else {
+                backoff.snooze();
+            }
+        }
+    }
+    fn try_recv(&self) -> Result<crate::core::commands::PartitionCommand, String> {
+        self.rx.lock().unwrap().pop_front().ok_or_else(|| "Empty".to_string())
+    }
+}
+
+pub struct SpinMessageSender {
+    pub tx: alloc::sync::Arc<no_std_tool::sync::SpinMutex<alloc::collections::VecDeque<crate::core::commands::PartitionCommand>>>,
+}
+
+impl MessageSender for SpinMessageSender {
+    fn send(&self, cmd: crate::core::commands::PartitionCommand) -> Result<(), String> {
+        self.tx.lock().unwrap().push_back(cmd);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,10 +508,8 @@ mod tests {
         let cmd = crate::core::commands::PartitionCommand::Shutdown;
         ms.send(cmd).unwrap();
         let recv_cmd = mq.recv().unwrap();
-        match recv_cmd {
-            crate::core::commands::PartitionCommand::Shutdown => {}
-            _ => panic!("Expected Shutdown"),
-        }
+        use std::assert_matches;
+        assert_matches!(recv_cmd, crate::core::commands::PartitionCommand::Shutdown);
 
         exec.spawn_task(alloc::boxed::Box::new(|| {
             let _ = 1 + 1;
@@ -446,26 +522,26 @@ mod tests {
         use alloc::vec;
         struct DummyFS;
         impl FileSystem for DummyFS {
-            fn write(&self, _path: &str, _data: &[u8]) -> Result<(), String> {
+            fn write(&self, _path: &str, _data: &[u8]) -> Result<(), IoError> {
                 Ok(())
             }
-            fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+            fn read(&self, path: &str) -> Result<Vec<u8>, IoError> {
                 if path == "ok" {
                     Ok(vec![1, 2, 3])
                 } else {
-                    Err("err".to_string())
+                    Err(IoError::Other("err"))
                 }
             }
-            fn append(&self, _path: &str, _data: &[u8]) -> Result<(), String> {
+            fn append(&self, _path: &str, _data: &[u8]) -> Result<(), IoError> {
                 Ok(())
             }
             fn exists(&self, _path: &str) -> bool {
                 false
             }
-            fn create_dir_all(&self, _path: &str) -> Result<(), String> {
+            fn create_dir_all(&self, _path: &str) -> Result<(), IoError> {
                 Ok(())
             }
-            fn read_dir(&self, _path: &str) -> Result<Vec<String>, String> {
+            fn read_dir(&self, _path: &str) -> Result<Vec<String>, IoError> {
                 Ok(vec![])
             }
         }

@@ -56,6 +56,13 @@ pub struct WorkerState {
     ///   when [`GLOBAL_EPOCH`] was `e` and has not yet called
     ///   [`WorkerState::leave`].
     pub local_epoch: AtomicUsize,
+
+    /// Flag indicating whether this worker is considered "offline" (e.g., stalled).
+    ///
+    /// When set to `true`, the `QsbrManager` will ignore this worker's `local_epoch`
+    /// during maintenance, allowing the global epoch to advance and memory to be
+    /// reclaimed even if this thread is permanently stuck.
+    pub is_offline: crate::core::atomic::AtomicBool,
 }
 
 impl Default for WorkerState {
@@ -70,6 +77,7 @@ impl WorkerState {
     pub fn new() -> Self {
         Self {
             local_epoch: AtomicUsize::new(0),
+            is_offline: crate::core::atomic::AtomicBool::new(false),
         }
     }
 
@@ -109,6 +117,18 @@ impl WorkerState {
     #[inline(always)]
     pub fn leave(&self) {
         self.local_epoch.store(0, Ordering::Release);
+    }
+
+    /// Forcefully marks this worker as offline, ignoring its epoch in QSBR maintenance.
+    #[inline(always)]
+    pub fn force_offline(&self) {
+        self.is_offline.store(true, Ordering::Release);
+    }
+
+    /// Resumes this worker as online, participating in QSBR maintenance again.
+    #[inline(always)]
+    pub fn resume_online(&self) {
+        self.is_offline.store(false, Ordering::Release);
     }
 }
 
@@ -229,9 +249,11 @@ impl QsbrManager {
 
         let mut curr_ptr = self.workers.load(Ordering::Acquire);
         while let Some(node) = unsafe { crate::core::rcu::load_node(curr_ptr) } {
-            let epoch = node.worker.local_epoch.load(Ordering::Acquire);
-            if epoch != 0 && epoch < min_epoch {
-                min_epoch = epoch;
+            if !node.worker.is_offline.load(Ordering::Acquire) {
+                let epoch = node.worker.local_epoch.load(Ordering::Acquire);
+                if epoch != 0 && epoch < min_epoch {
+                    min_epoch = epoch;
+                }
             }
             curr_ptr = node.next.load(Ordering::Acquire);
         }

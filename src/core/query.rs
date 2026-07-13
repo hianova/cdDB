@@ -206,6 +206,7 @@ pub struct QuerySession<'a, const N: usize> {
     int_arena: Bump<u32>,
     str_arena: Bump<&'a str>,
     blob_arena: Bump<&'a [u8]>,
+    bypass_l1_cache: bool,
 }
 
 impl<'a, const N: usize> Query<'a, N> {
@@ -285,7 +286,14 @@ impl<'a, const N: usize> QuerySession<'a, N> {
             int_arena: Bump::new(),
             str_arena: Bump::new(),
             blob_arena: Bump::new(),
+            bypass_l1_cache: false,
         }
+    }
+
+    /// Modify this session to bypass L1 cache (DualCacheFF) lookups.
+    pub fn with_bypass_l1_cache(mut self, bypass: bool) -> Self {
+        self.bypass_l1_cache = bypass;
+        self
     }
 
     /// Dispatch a slice of [`QueryNode`]s and call `cb` once for each result.
@@ -477,8 +485,9 @@ impl<'a, const N: usize> QuerySession<'a, N> {
     pub fn get_str(&self, entity_id: usize, attr: &str) -> Option<String> {
         #[cfg(all(feature = "dualcache-ff", feature = "std"))]
         {
-            let handle = self.route.hot_index.register_thread();
-            let _pin = dualcache_ff::componant::qsbr::pin(handle.qsbr_node);
+            if !self.bypass_l1_cache {
+                let handle = self.route.hot_index.register_thread();
+            let _pin = dualcache_ff::core::qsbr::pin(handle.qsbr_node);
 
             if self
                 .route
@@ -488,8 +497,9 @@ impl<'a, const N: usize> QuerySession<'a, N> {
                 let node = self.get_pointer(entity_id)?;
                 let idx = *node.attribute_indices.get(attr)?;
                 let cols = crate::core::rcu::load_ref(&self.route.columns);
-                let col = cols.str_cols.get(attr)?;
-                return col.get_element_pinned(idx);
+                    let col = cols.str_cols.get(attr)?;
+                    return col.get_element_pinned(idx);
+                }
             }
         }
 
@@ -655,14 +665,10 @@ pub struct PartitionRoute<const N: usize> {
         DualCacheFF<
             (u32, usize),
             (),
-            dualcache_ff::componant::config::DefaultExponentialPolicy,
             64,
             4096,
             262144,
             266304,
-            16,
-            1024,
-            64,
         >,
     >,
     /// RCU pointer to the partition's [`SimpleBloom<N>`] filter. Consulted
@@ -912,10 +918,10 @@ mod tests {
 
         // DualCacheFF
 
-        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
-        let cache = crate::DualCacheFF::new(dualcache_ff::componant::policy::DefaultEvictionPolicy::new());
-        #[cfg(not(all(feature = "dualcache-ff", feature = "std")))]
-        let cache = crate::DualCacheFF::new(crate::CacheConfig::default());
+        let cache = cfg_select! {
+            all(feature = "dualcache-ff", feature = "std") => crate::DualCacheFF::new(),
+            _ => crate::DualCacheFF::new(crate::CacheConfig::default()),
+        };
         let hot_index = Arc::new(cache);
 
         let storage = Arc::new(crate::Storage::new(
@@ -1416,10 +1422,10 @@ mod tests {
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
 
-        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
-        let cache = crate::DualCacheFF::new(dualcache_ff::componant::policy::DefaultEvictionPolicy::new());
-        #[cfg(not(all(feature = "dualcache-ff", feature = "std")))]
-        let cache = crate::DualCacheFF::new(crate::CacheConfig::default());
+        let cache = cfg_select! {
+            all(feature = "dualcache-ff", feature = "std") => crate::DualCacheFF::new(),
+            _ => crate::DualCacheFF::new(crate::CacheConfig::default()),
+        };
 
         let route = Arc::new(PartitionRoute {
             name: "link_test".to_string(),
@@ -1567,10 +1573,10 @@ mod tests {
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
 
-        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
-        let cache = crate::DualCacheFF::new(dualcache_ff::componant::policy::DefaultEvictionPolicy::new());
-        #[cfg(not(all(feature = "dualcache-ff", feature = "std")))]
-        let cache = crate::DualCacheFF::new(crate::CacheConfig::default());
+        let cache = cfg_select! {
+            all(feature = "dualcache-ff", feature = "std") => crate::DualCacheFF::new(),
+            _ => crate::DualCacheFF::new(crate::CacheConfig::default()),
+        };
 
         let route = Arc::new(PartitionRoute {
             name: "signed_test".to_string(),

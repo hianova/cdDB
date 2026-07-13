@@ -55,6 +55,30 @@
 //!
 //! ## Quick Start
 //!
+//! ### Basic Setup (Global Static Database)
+//!
+//! Using the `cddb_init!` macro to generate a globally accessible, thread-safe `CdDBDispatcher`:
+//!
+//! ```rust,ignore
+//! use cdDB::{cddb_init, WriteCommand, Attributes, QueryNode, QueryResult};
+//! use std::thread;
+//!
+//! // 1. Create a global static dispatcher and register partitions.
+//! cddb_init!(
+//!     pub static GLOBAL_DB: 1024 = "./data",
+//!     partitions = ["users", "orders"]
+//! );
+//! 
+//! fn main() {
+//!     // The macro returns a tuple of `(CdDBDispatcher, BTreeMap<&'static str, Arc<UserWriter>>)`
+//!     let (db, writers) = &*GLOBAL_DB;
+//!     let tx = writers.get("users").unwrap();
+//! ```
+//!
+//! ### Manual Setup
+//! 
+//! Alternatively, initialize manually without the macro:
+//! 
 //! ```rust,ignore
 //! use cdDB::{CdDBDispatcher, WriteCommand, Attributes, QueryNode, QueryResult};
 //! use std::thread;
@@ -129,6 +153,40 @@ pub use io::wal::{
 };
 
 pub use crate::core::AHashMap;
+
+/// Convenience macro to initialize a static global CdDB database and register partitions.
+/// Returns a tuple of `(CdDBDispatcher<N>, BTreeMap<&'static str, Arc<UserWriter>>)`.
+///
+/// # Example
+/// ```rust,ignore
+/// cddb_init!(
+///     pub static GLOBAL_DB: 1024 = "./db_data",
+///     partitions = ["users", "orders"]
+/// );
+/// ```
+#[cfg(feature = "std")]
+#[macro_export]
+macro_rules! cddb_init {
+    (
+        $vis:vis static $name:ident : $n:tt = $path:expr, partitions = [ $( $part:expr ),* $(,)? ]
+    ) => {
+        $vis static $name: std::sync::LazyLock<(
+            $crate::CdDBDispatcher<$n>, 
+            std::collections::BTreeMap<&'static str, alloc::sync::Arc<$crate::UserWriter>>
+        )> = std::sync::LazyLock::new(|| {
+            let mut db = $crate::CdDBDispatcher::<$n>::new_std(
+                Some($path.into()), 
+                $crate::CacheConfig::default()
+            );
+            let mut tx_map = std::collections::BTreeMap::new();
+            $(
+                let tx = alloc::sync::Arc::new(db.register_partition(alloc::string::String::from($part)));
+                tx_map.insert($part, tx);
+            )*
+            (db, tx_map)
+        });
+    };
+}
 
 /// Configuration for the cache subsystem.
 #[derive(Debug, Clone, Copy)]
@@ -223,3 +281,26 @@ pub use dualcache_ff;
 
 #[cfg(any(not(feature = "dualcache-ff"), not(feature = "std")))]
 pub use dualcache_stub::DualCacheFF;
+
+#[cfg(all(test, feature = "std"))]
+mod macro_tests {
+    cddb_init!(
+        pub static TEST_DB: 16 = "/tmp/cddb_macro_test",
+        partitions = ["test1", "test2"]
+    );
+
+    #[test]
+    #[ignore]
+    fn test_cddb_init_macro() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let (_db, writers) = &*TEST_DB;
+                assert!(writers.contains_key("test1"));
+                assert!(writers.contains_key("test2"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}

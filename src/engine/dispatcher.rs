@@ -138,14 +138,10 @@ pub struct CdDBDispatcher<const N: usize> {
         DualCacheFF<
             (u32, usize),
             (),
-            dualcache_ff::componant::config::DefaultExponentialPolicy,
             64,
             4096,
             262144,
             266304,
-            16,
-            1024,
-            64,
         >,
     >,
     /// Monotonically increasing counter used to assign a unique `u32` ID to
@@ -200,25 +196,22 @@ impl<const N: usize> CdDBDispatcher<N> {
         executor: Arc<dyn Executor>,
         _cache_config: crate::CacheConfig,
     ) -> Self {
-        #[cfg(feature = "dualcache-ff")]
-        let global_cache = {
-            let cache = alloc::sync::Arc::new(DualCacheFF::new(
-                dualcache_ff::componant::policy::DefaultEvictionPolicy::new(),
-            ));
-            
-            if _cache_config.daemon_mode {
-                // SAFETY: set_daemon_mode requires &'static self because the daemon thread
-                // needs to hold a reference to the cache core. We guarantee this is safe because
-                // in CdDBDispatcher::drop, we explicitly call set_daemon_mode(false) which blocks
-                // and joins the daemon thread BEFORE the Arc is dropped. Thus, the cache instance
-                // is guaranteed to outlive the daemon thread.
-                unsafe { (*alloc::sync::Arc::as_ptr(&cache)).set_daemon_mode(true) };
-            }
-            cache
+        let global_cache = cfg_select! {
+            feature = "dualcache-ff" => { {
+                let cache = alloc::sync::Arc::new(DualCacheFF::new());
+                
+                if _cache_config.daemon_mode {
+                    // SAFETY: set_daemon_mode requires &'static self because the daemon thread
+                    // needs to hold a reference to the cache core. We guarantee this is safe because
+                    // in CdDBDispatcher::drop, we explicitly call set_daemon_mode(false) which blocks
+                    // and joins the daemon thread BEFORE the Arc is dropped. Thus, the cache instance
+                    // is guaranteed to outlive the daemon thread.
+                    unsafe { (*alloc::sync::Arc::as_ptr(&cache)).set_daemon_mode(true) };
+                }
+                cache
+            } },
+            _ => alloc::sync::Arc::new(DualCacheFF::new()),
         };
-
-        #[cfg(not(feature = "dualcache-ff"))]
-        let global_cache = alloc::sync::Arc::new(DualCacheFF::new(_cache_config.clone()));
 
         Self {
             route_table: AHashMap::default(),
@@ -259,6 +252,21 @@ impl<const N: usize> CdDBDispatcher<N> {
         Self::new(
             base_path,
             Arc::new(crate::io::platform::StdFileSystem),
+            Arc::new(crate::io::platform::StdExecutor),
+            cache_config,
+        )
+    }
+
+    /// Creates a purely in-memory instance of `CdDBDispatcher`.
+    ///
+    /// This bypasses all disk I/O by utilizing a `NullFileSystem`. Data writes
+    /// are discarded, and reads return empty, maximizing memory efficiency for
+    /// cache-only workloads.
+    #[cfg(feature = "std")]
+    pub fn new_in_memory(cache_config: crate::CacheConfig) -> Self {
+        Self::new(
+            Some("in_memory_db".into()),
+            Arc::new(crate::io::platform::NullFileSystem),
             Arc::new(crate::io::platform::StdExecutor),
             cache_config,
         )
@@ -508,14 +516,10 @@ impl<const N: usize> CdDBDispatcher<N> {
             DualCacheFF<
                 (u32, usize),
                 (),
-                dualcache_ff::componant::config::DefaultExponentialPolicy,
                 64,
                 4096,
                 262144,
                 266304,
-                16,
-                1024,
-                64,
             >,
         >,
     ) -> crate::io::platform::TaskHandle {
@@ -658,7 +662,6 @@ impl<const N: usize> CdDBDispatcher<N> {
             });
         }
 
-        #[cfg(feature = "dualcache-ff")]
         let (
             cache_enabled,
             cache_is_cold_start,
@@ -667,29 +670,13 @@ impl<const N: usize> CdDBDispatcher<N> {
             cache_t1_count,
             cache_t2_count,
             cache_core_count,
-        ) = {
-            #[cfg(feature = "std")]
-            {
+        ) = cfg_select! {
+            feature = "dualcache-ff" => { {
                 let (t1, t2, core) = (0, 0, 0);
                 (true, false, 0, 0, t1, t2, core)
-            }
-            #[cfg(not(feature = "std"))]
-            {
-                let (t1, t2, core) = (0, 0, 0);
-                (true, false, 0, 0, t1, t2, core)
-            }
+            } },
+            _ => (false, false, 0, 0, 0, 0, 0)
         };
-
-        #[cfg(not(feature = "dualcache-ff"))]
-        let (
-            cache_enabled,
-            cache_is_cold_start,
-            cache_pending_commands,
-            cache_epoch,
-            cache_t1_count,
-            cache_t2_count,
-            cache_core_count,
-        ) = (false, false, 0, 0, 0, 0, 0);
 
         DbMetrics {
             is_sleeping,
@@ -994,7 +981,7 @@ mod tests {
         ));
 
         #[cfg(feature = "dualcache-ff")]
-        let cache = crate::DualCacheFF::new(dualcache_ff::componant::policy::DefaultEvictionPolicy::new());
+        let cache = crate::DualCacheFF::new();
         #[cfg(not(feature = "dualcache-ff"))]
         let cache = crate::DualCacheFF::new(crate::CacheConfig::default());
 
