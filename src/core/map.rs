@@ -65,6 +65,7 @@ where
     K: Eq + Hash,
     S: BuildHasher,
 {
+    #[inline(never)]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         if self.table.is_empty() || (self.len + self.deleted_count + 1) * 10 >= self.table.len() * 7
         {

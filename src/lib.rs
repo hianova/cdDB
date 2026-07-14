@@ -121,10 +121,19 @@ extern crate alloc;
 extern crate std;
 
 pub mod core;
-
 #[cfg(feature = "std")]
 pub mod engine;
 pub mod io;
+#[cfg(all(feature = "std", feature = "dualcache-ff"))]
+pub mod cache;
+
+#[cfg(feature = "std")]
+pub mod ml;
+#[cfg(feature = "std")]
+pub mod agent;
+
+#[cfg(all(feature = "std", feature = "dualcache-ff"))]
+pub use cache::HitCache;
 
 // Re-export public types for API compatibility
 pub use core::column::{ColumnArray, Columns};
