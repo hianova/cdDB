@@ -68,7 +68,7 @@
 //!     pub static GLOBAL_DB: 1024 = "./data",
 //!     partitions = ["users", "orders"]
 //! );
-//! 
+//!
 //! fn main() {
 //!     // The macro returns a tuple of `(CdDBDispatcher, BTreeMap<&'static str, Arc<UserWriter>>)`
 //!     let (db, writers) = &*GLOBAL_DB;
@@ -76,9 +76,9 @@
 //! ```
 //!
 //! ### Manual Setup
-//! 
+//!
 //! Alternatively, initialize manually without the macro:
-//! 
+//!
 //! ```rust,ignore
 //! use cdDB::{CdDBDispatcher, WriteCommand, Attributes, QueryNode, QueryResult};
 //! use std::thread;
@@ -120,17 +120,17 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+#[cfg(all(feature = "std", feature = "dualcache-ff"))]
+pub mod cache;
 pub mod core;
 #[cfg(feature = "std")]
 pub mod engine;
 pub mod io;
-#[cfg(all(feature = "std", feature = "dualcache-ff"))]
-pub mod cache;
 
 #[cfg(feature = "std")]
-pub mod ml;
-#[cfg(feature = "std")]
 pub mod agent;
+#[cfg(feature = "std")]
+pub mod ml;
 
 #[cfg(all(feature = "std", feature = "dualcache-ff"))]
 pub use cache::HitCache;
@@ -180,11 +180,11 @@ macro_rules! cddb_init {
         $vis:vis static $name:ident : $n:tt = $path:expr, partitions = [ $( $part:expr ),* $(,)? ]
     ) => {
         $vis static $name: std::sync::LazyLock<(
-            $crate::CdDBDispatcher<$n>, 
+            $crate::CdDBDispatcher<$n>,
             std::collections::BTreeMap<&'static str, alloc::sync::Arc<$crate::UserWriter>>
         )> = std::sync::LazyLock::new(|| {
             let mut db = $crate::CdDBDispatcher::<$n>::new_std(
-                Some($path.into()), 
+                Some($path.into()),
                 $crate::CacheConfig::default()
             );
             let mut tx_map = std::collections::BTreeMap::new();
@@ -212,7 +212,6 @@ impl Default for CacheConfig {
         }
     }
 }
-
 
 #[cfg(any(not(feature = "dualcache-ff"), not(feature = "std")))]
 mod dualcache_stub {

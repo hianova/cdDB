@@ -26,13 +26,13 @@ pub struct HitCache<
 }
 
 impl<
-        K: Eq + Hash + Clone + Copy + Send + Sync + 'static,
-        V: Clone + Send + Sync + 'static,
-        const B0: usize,
-        const B1: usize,
-        const B2: usize,
-        const B3: usize,
-    > HitCache<K, V, B0, B1, B2, B3>
+    K: Eq + Hash + Clone + Copy + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    const B0: usize,
+    const B1: usize,
+    const B2: usize,
+    const B3: usize,
+> HitCache<K, V, B0, B1, B2, B3>
 {
     pub fn new() -> Self {
         Self {
@@ -67,13 +67,13 @@ impl<
 }
 
 impl<
-        K: Eq + Hash + Clone + Copy + Send + Sync + 'static,
-        V: Clone + Send + Sync + 'static,
-        const B0: usize,
-        const B1: usize,
-        const B2: usize,
-        const B3: usize,
-    > Default for HitCache<K, V, B0, B1, B2, B3>
+    K: Eq + Hash + Clone + Copy + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    const B0: usize,
+    const B1: usize,
+    const B2: usize,
+    const B3: usize,
+> Default for HitCache<K, V, B0, B1, B2, B3>
 {
     fn default() -> Self {
         Self::new()

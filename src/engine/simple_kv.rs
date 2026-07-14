@@ -1,19 +1,19 @@
 #[cfg(feature = "std")]
-use alloc::sync::Arc;
-#[cfg(feature = "std")]
 use alloc::string::{String, ToString};
+#[cfg(feature = "std")]
+use alloc::sync::Arc;
 #[cfg(feature = "std")]
 use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
 use crate::{
-    CdDBDispatcher, CacheConfig, WalMode,
+    CacheConfig, CdDBDispatcher, WalMode,
     core::commands::{Attributes, WriteCommand},
     core::query::{QueryNode, QueryResult},
 };
 
 /// A highly simplified, beginner-friendly Key-Value store facade over cdDB.
-/// 
+///
 /// This encapsulates all dispatcher, worker, and partition boilerplate, allowing
 /// standard simple `put` and `get` semantics for rapid development.
 #[cfg(feature = "std")]
@@ -28,13 +28,11 @@ impl SimpleKvStore {
     /// Opens or creates a simple KV store at the specified directory path.
     /// Uses default CacheConfig (with Daemon Mode enabled).
     pub fn open(path: &str) -> Self {
-        let mut dispatcher = CdDBDispatcher::<1024>::new_std(
-            Some(path.to_string()),
-            CacheConfig::default(),
-        );
+        let mut dispatcher =
+            CdDBDispatcher::<1024>::new_std(Some(path.to_string()), CacheConfig::default());
 
         let partition_name = "default".to_string();
-        
+
         // Register a partition with WAL persistence enabled.
         let writer = dispatcher.register_partition_with_wal(
             partition_name.clone(),
@@ -70,14 +68,15 @@ impl SimpleKvStore {
             entity_id: key,
             attr: "data",
         };
-        
+
         let mut res = None;
-        self.dispatcher.execute_batch(&self.partition_name, &[node], |result| {
-            if let QueryResult::Blob(b) = result {
-                res = Some(b);
-            }
-        });
-        
+        self.dispatcher
+            .execute_batch(&self.partition_name, &[node], |result| {
+                if let QueryResult::Blob(b) = result {
+                    res = Some(b);
+                }
+            });
+
         res
     }
 
@@ -99,23 +98,22 @@ mod tests {
     #[ignore]
     fn test_simple_kv_store() {
         let store = SimpleKvStore::open("/tmp/cddb_test_simple_kv");
-        
+
         store.put(42, vec![1, 2, 3]).unwrap();
-        
+
         // Let background workers process
         std::thread::sleep(Duration::from_millis(50));
-        
+
         assert_eq!(store.get(42), Some(vec![1, 2, 3]));
-        
+
         store.delete(42).unwrap();
         std::thread::sleep(Duration::from_millis(50));
-        
+
         assert_eq!(store.get(42), None);
     }
     #[test]
     #[ignore]
     fn test_stack_overflow() {
         let _d = CdDBDispatcher::<1024>::new_std(None, crate::CacheConfig::default());
-
     }
 }

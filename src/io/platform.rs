@@ -1,6 +1,7 @@
 use alloc::string::String;
 use alloc::string::ToString;
-use alloc::vec::Vec;pub use no_std_tool::sync::Backoff;
+use alloc::vec::Vec;
+pub use no_std_tool::sync::Backoff;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IoError {
@@ -36,14 +37,30 @@ impl From<IoError> for alloc::string::String {
 pub struct NullFileSystem;
 
 impl FileSystem for NullFileSystem {
-    fn write(&self, _path: &str, _data: &[u8]) -> Result<(), IoError> { Ok(()) }
-    fn read(&self, _path: &str) -> Result<Vec<u8>, IoError> { Ok(Vec::new()) }
-    fn append(&self, _path: &str, _data: &[u8]) -> Result<(), IoError> { Ok(()) }
-    fn read_range(&self, _path: &str, _offset: u64, _len: usize) -> Result<Vec<u8>, IoError> { Ok(Vec::new()) }
-    fn file_size(&self, _path: &str) -> Result<u64, IoError> { Ok(0) }
-    fn exists(&self, _path: &str) -> bool { true }
-    fn create_dir_all(&self, _path: &str) -> Result<(), IoError> { Ok(()) }
-    fn read_dir(&self, _path: &str) -> Result<Vec<String>, IoError> { Ok(Vec::new()) }
+    fn write(&self, _path: &str, _data: &[u8]) -> Result<(), IoError> {
+        Ok(())
+    }
+    fn read(&self, _path: &str) -> Result<Vec<u8>, IoError> {
+        Ok(Vec::new())
+    }
+    fn append(&self, _path: &str, _data: &[u8]) -> Result<(), IoError> {
+        Ok(())
+    }
+    fn read_range(&self, _path: &str, _offset: u64, _len: usize) -> Result<Vec<u8>, IoError> {
+        Ok(Vec::new())
+    }
+    fn file_size(&self, _path: &str) -> Result<u64, IoError> {
+        Ok(0)
+    }
+    fn exists(&self, _path: &str) -> bool {
+        true
+    }
+    fn create_dir_all(&self, _path: &str) -> Result<(), IoError> {
+        Ok(())
+    }
+    fn read_dir(&self, _path: &str) -> Result<Vec<String>, IoError> {
+        Ok(Vec::new())
+    }
 }
 /// Platform Abstraction Layer (PAL) for all file I/O operations.
 ///
@@ -207,8 +224,7 @@ impl FileSystem for StdFileSystem {
     fn write(&self, path: &str, data: &[u8]) -> Result<(), IoError> {
         use std::io::Write;
         let mut file = std::fs::File::create(path).map_err(Into::<IoError>::into)?;
-        file.write_all(data)
-            .map_err(Into::<IoError>::into)
+        file.write_all(data).map_err(Into::<IoError>::into)
     }
     fn read(&self, path: &str) -> Result<Vec<u8>, IoError> {
         std::fs::read(path).map_err(Into::<IoError>::into)
@@ -220,8 +236,7 @@ impl FileSystem for StdFileSystem {
             .append(true)
             .open(path)
             .map_err(Into::<IoError>::into)?;
-        file.write_all(data)
-            .map_err(Into::<IoError>::into)
+        file.write_all(data).map_err(Into::<IoError>::into)
     }
     fn read_range(&self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>, IoError> {
         use std::io::{Read, Seek};
@@ -308,11 +323,10 @@ pub trait MessageQueue: Send + Sync {
 #[cfg(feature = "std")]
 pub struct StdMessageQueue {
     /// The shared bounded queue from which commands are consumed.
-    pub rx:
-        alloc::sync::Arc<no_std_tool::collections::BoundedQueue<crate::core::commands::PartitionCommand, 262144>>,
+    pub rx: alloc::sync::Arc<
+        no_std_tool::collections::BoundedQueue<crate::core::commands::PartitionCommand, 262144>,
+    >,
 }
-
-
 
 #[cfg(feature = "std")]
 impl MessageQueue for StdMessageQueue {
@@ -406,8 +420,9 @@ pub trait MessageSender: Send + Sync {
 #[allow(dead_code)]
 pub struct StdMessageSender {
     /// The shared bounded queue into which commands are pushed.
-    pub tx:
-        alloc::sync::Arc<no_std_tool::collections::BoundedQueue<crate::core::commands::PartitionCommand, 262144>>,
+    pub tx: alloc::sync::Arc<
+        no_std_tool::collections::BoundedQueue<crate::core::commands::PartitionCommand, 262144>,
+    >,
 }
 
 #[cfg(feature = "std")]
@@ -431,7 +446,11 @@ impl MessageSender for StdMessageSender {
 }
 
 pub struct SpinMessageQueue {
-    pub rx: alloc::sync::Arc<no_std_tool::sync::SpinMutex<alloc::collections::VecDeque<crate::core::commands::PartitionCommand>>>,
+    pub rx: alloc::sync::Arc<
+        no_std_tool::sync::SpinMutex<
+            alloc::collections::VecDeque<crate::core::commands::PartitionCommand>,
+        >,
+    >,
 }
 
 impl MessageQueue for SpinMessageQueue {
@@ -452,12 +471,20 @@ impl MessageQueue for SpinMessageQueue {
         }
     }
     fn try_recv(&self) -> Result<crate::core::commands::PartitionCommand, String> {
-        self.rx.lock().unwrap().pop_front().ok_or_else(|| "Empty".to_string())
+        self.rx
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| "Empty".to_string())
     }
 }
 
 pub struct SpinMessageSender {
-    pub tx: alloc::sync::Arc<no_std_tool::sync::SpinMutex<alloc::collections::VecDeque<crate::core::commands::PartitionCommand>>>,
+    pub tx: alloc::sync::Arc<
+        no_std_tool::sync::SpinMutex<
+            alloc::collections::VecDeque<crate::core::commands::PartitionCommand>,
+        >,
+    >,
 }
 
 impl MessageSender for SpinMessageSender {
@@ -515,7 +542,6 @@ mod tests {
             let _ = 1 + 1;
         }));
     }
-
 
     #[test]
     fn test_filesystem_default_impls() {

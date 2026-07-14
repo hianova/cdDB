@@ -1,26 +1,17 @@
+use crate::cache::HitCache;
 use crate::{
-    engine::dispatcher::CdDBDispatcher, 
-    core::commands::WriteCommand, 
-    core::commands::Attributes,
+    core::commands::Attributes, core::commands::WriteCommand, engine::dispatcher::CdDBDispatcher,
     engine::dispatcher::UserWriter,
 };
-use crate::cache::HitCache;
+use std::string::{String, ToString};
 use std::sync::{Arc, OnceLock};
 use std::vec::Vec;
-use std::string::{String, ToString};
 
 /// The Memory & State Mesh
 /// Bridges the mmap model loader, DualCacheFF routing, and cdDB disk persistence.
 pub struct MemoryMesh {
     /// O(1) Wait-Free routing state machine mapping Intent Hash -> Success State.
-    pub cache: HitCache<
-        u64,
-        Arc<String>,
-        1024,
-        2048,
-        4096,
-        7168,
-    >,
+    pub cache: HitCache<u64, Arc<String>, 1024, 2048, 4096, 7168>,
     /// High-performance synchronous persistent storage engine.
     _db: CdDBDispatcher<1024>,
     workflows_writer: UserWriter,
@@ -36,9 +27,7 @@ impl MemoryMesh {
             // We spawn a temporary thread with 128MB stack to initialize it safely.
             std::thread::Builder::new()
                 .stack_size(128 * 1024 * 1024)
-                .spawn(|| {
-                    MemoryMesh::new()
-                })
+                .spawn(MemoryMesh::new)
                 .unwrap()
                 .join()
                 .unwrap()
@@ -55,7 +44,7 @@ impl MemoryMesh {
             .unwrap()
             .join()
             .unwrap();
-            
+
         let workflows_writer = db.register_partition("workflows".to_string());
         let temporal_writer = db.register_partition("temporal_log".to_string());
 

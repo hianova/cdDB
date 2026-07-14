@@ -180,9 +180,14 @@ mod tests {
     use crate::io::platform::{StdExecutor, StdFileSystem};
     use alloc::vec;
     use std::time::Duration;
-    
+
     fn make_test_dispatcher() -> CdDBDispatcher<1024> {
-        CdDBDispatcher::<1024>::new(None, Arc::new(StdFileSystem), Arc::new(StdExecutor), crate::CacheConfig::default())
+        CdDBDispatcher::<1024>::new(
+            None,
+            Arc::new(StdFileSystem),
+            Arc::new(StdExecutor),
+            crate::CacheConfig::default(),
+        )
     }
 
     #[test]

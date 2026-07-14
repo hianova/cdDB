@@ -87,16 +87,7 @@ pub struct Partition<const N: usize> {
     /// Storage layer instance for this partition.
     pub storage: Arc<Storage>,
     /// Heat tracking cache for hot entities.
-    pub hot_index: Arc<
-        DualCacheFF<
-            (u32, usize),
-            (),
-            64,
-            4096,
-            262144,
-            266304,
-        >,
-    >, // Just for heat tracking
+    pub hot_index: Arc<DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304>>, // Just for heat tracking
     /// The unique numeric ID of this partition.
     pub partition_id: u32,
     /// Thread-safe pointer to the Bloom filter.
@@ -138,16 +129,7 @@ impl<const N: usize> Partition<N> {
         fs: Arc<dyn FileSystem>,
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
         bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
-        hot_index: Arc<
-            DualCacheFF<
-                (u32, usize),
-                (),
-                64,
-                4096,
-                262144,
-                266304,
-            >,
-        >,
+        hot_index: Arc<DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304>>,
         partition_id: u32,
     ) -> Self {
         let storage = Arc::new(Storage::new(storage_path, fs.clone()));
@@ -264,10 +246,11 @@ impl<const N: usize> Partition<N> {
             };
 
             let mut commands = vec![cmd];
+            let mut shutdown_received = false;
             for _ in 0..1000 {
                 if let Ok(next) = self.writer_rx.try_recv() {
                     if let crate::core::commands::PartitionCommand::Shutdown = next {
-                        commands.push(next);
+                        shutdown_received = true;
                         break;
                     }
                     commands.push(next);
@@ -289,6 +272,10 @@ impl<const N: usize> Partition<N> {
             self.apply_batch_commands(commands);
             let _ = self.storage.flush();
             self.qsbr.maintenance();
+
+            if shutdown_received {
+                break;
+            }
         }
 
         #[cfg(feature = "std")]
@@ -661,10 +648,10 @@ impl<const N: usize> Partition<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use no_std_tool::collections::SimpleBloom;
     use crate::core::rcu::new_atomic_ptr;
     use crate::engine::partition::WorkerNode;
     use crate::io::wal::NoopWal;
+    use no_std_tool::collections::SimpleBloom;
 
     #[test]
     #[ignore]

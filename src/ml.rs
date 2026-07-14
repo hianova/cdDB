@@ -1,27 +1,20 @@
+use crate::cache::HitCache;
 use crate::{
-    engine::dispatcher::CdDBDispatcher, 
-    core::commands::WriteCommand, 
     core::commands::Attributes,
+    core::commands::WriteCommand,
     core::query::{QueryNode, QueryResult},
+    engine::dispatcher::CdDBDispatcher,
     engine::dispatcher::UserWriter,
 };
-use crate::cache::HitCache;
-use std::sync::Arc;
 use std::boxed::Box;
-use std::vec::Vec;
 use std::string::ToString;
+use std::sync::Arc;
+use std::vec::Vec;
 
 /// A Tiered Tensor Cache leveraging cdDB HitCache and L3 disk persistence.
 /// Provides O(1) lock-free read access and fast disk eviction for tensors.
 pub struct TieredTensorCache {
-    pub cache: HitCache<
-        u64,
-        Arc<[i32]>,
-        1024,
-        2048,
-        4096,
-        7168,
-    >,
+    pub cache: HitCache<u64, Arc<[i32]>, 1024, 2048, 4096, 7168>,
     db: Box<CdDBDispatcher<1024>>,
     kv_writer: UserWriter,
     pub block_size: usize,
@@ -30,20 +23,21 @@ pub struct TieredTensorCache {
 }
 
 impl TieredTensorCache {
-    pub fn new(
-        session_id: u32,
-        hidden_dim: usize,
-        block_size: usize,
-    ) -> Self {
+    pub fn new(session_id: u32, hidden_dim: usize, block_size: usize) -> Self {
         let cache = HitCache::new();
 
         let mut db = std::thread::Builder::new()
             .stack_size(128 * 1024 * 1024)
-            .spawn(|| Box::new(CdDBDispatcher::<1024>::new_std(None, crate::CacheConfig::default())))
+            .spawn(|| {
+                Box::new(CdDBDispatcher::<1024>::new_std(
+                    None,
+                    crate::CacheConfig::default(),
+                ))
+            })
             .unwrap()
             .join()
             .unwrap();
-            
+
         let kv_writer = db.register_partition("tensor_storage".to_string());
 
         Self {
@@ -65,7 +59,7 @@ impl TieredTensorCache {
     pub fn insert_system_prompt(&self, block_idx: usize, tensor_data: Vec<i32>) {
         let key = self.block_key(block_idx);
         let payload: Arc<[i32]> = tensor_data.into_boxed_slice().into();
-        
+
         self.cache.insert(key, payload.clone());
         self.persist_to_disk(block_idx, payload);
     }
@@ -74,7 +68,7 @@ impl TieredTensorCache {
     pub fn insert_block(&self, block_idx: usize, tensor_data: Vec<i32>) {
         let key = self.block_key(block_idx);
         let payload: Arc<[i32]> = tensor_data.into_boxed_slice().into();
-        
+
         self.cache.insert(key, payload.clone());
         self.persist_to_disk(block_idx, payload);
     }

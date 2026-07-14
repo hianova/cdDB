@@ -12,8 +12,8 @@ use no_std_tool::collections::BoundedQueue;
 use crate::DualCacheFF;
 use no_std_tool::collections::SimpleBloom;
 
-use crate::core::column::MultiVectorPointer;
 use crate::core::column::Columns;
+use crate::core::column::MultiVectorPointer;
 #[cfg(feature = "std")]
 use crate::core::commands::{PartitionCommand, WriteCommand};
 use crate::core::qsbr::WorkerNode;
@@ -134,16 +134,7 @@ pub struct CdDBDispatcher<const N: usize> {
     /// Cache keys are `(partition_id, entity_id)` tuples, ensuring isolation
     /// between partitions while allowing the eviction policy to see the full
     /// cross-partition access distribution.
-    pub global_cache: Arc<
-        DualCacheFF<
-            (u32, usize),
-            (),
-            64,
-            4096,
-            262144,
-            266304,
-        >,
-    >,
+    pub global_cache: Arc<DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304>>,
     /// Monotonically increasing counter used to assign a unique `u32` ID to
     /// each registered partition. Incremented once per
     /// [`register_partition_with_wal_provider`](Self::register_partition_with_wal_provider)
@@ -199,7 +190,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         let global_cache = cfg_select! {
             feature = "dualcache-ff" => { {
                 let cache = alloc::sync::Arc::new(DualCacheFF::new());
-                
+
                 if _cache_config.daemon_mode {
                     // SAFETY: set_daemon_mode requires &'static self because the daemon thread
                     // needs to hold a reference to the cache core. We guarantee this is safe because
@@ -512,16 +503,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
         bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
         partition_id: u32,
-        hot_index: Arc<
-            DualCacheFF<
-                (u32, usize),
-                (),
-                64,
-                4096,
-                262144,
-                266304,
-            >,
-        >,
+        hot_index: Arc<DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304>>,
     ) -> crate::io::platform::TaskHandle {
         let fs_rt = self.fs.clone();
         let wal_rt = wal.clone();
@@ -781,10 +763,8 @@ impl<const N: usize> Drop for CdDBDispatcher<N> {
         {
             // Send Shutdown command to all partition queues.
             for route in self.route_table.values() {
-                let mut retries = 0;
                 let mut backoff = crate::io::platform::Backoff::new();
-                while route.writer_tx.push(PartitionCommand::Shutdown).is_err() && retries < 1000 {
-                    retries += 1;
+                while route.writer_tx.push(PartitionCommand::Shutdown).is_err() {
                     if backoff.is_completed() {
                         std::thread::yield_now();
                     } else {
@@ -894,10 +874,8 @@ impl UserWriter {
 impl Drop for UserWriter {
     fn drop(&mut self) {
         // Send shutdown command on drop to gracefully terminate the background partition thread
-        let mut retries = 0;
         let mut backoff = crate::io::platform::Backoff::new();
-        while self.0.push(PartitionCommand::Shutdown).is_err() && retries < 1000 {
-            retries += 1;
+        while self.0.push(PartitionCommand::Shutdown).is_err() {
             if backoff.is_completed() {
                 std::thread::yield_now();
             } else {
@@ -915,10 +893,10 @@ impl Drop for UserWriter {
 mod tests {
     use super::*;
     use crate::core::commands::WriteCommand;
-    use no_std_tool::collections::BoundedQueue;
     use alloc::string::ToString;
     use alloc::sync::Arc;
     use alloc::vec;
+    use no_std_tool::collections::BoundedQueue;
 
     #[cfg(feature = "std")]
     #[test]
@@ -938,7 +916,10 @@ mod tests {
         let q = Arc::new(BoundedQueue::new());
         let writer = UserWriter(q.clone());
         let mut i = 1;
-        while writer.try_send(WriteCommand::Delete { entity_id: i }).is_ok() {
+        while writer
+            .try_send(WriteCommand::Delete { entity_id: i })
+            .is_ok()
+        {
             i += 1;
         }
 

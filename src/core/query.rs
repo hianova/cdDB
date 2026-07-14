@@ -1,11 +1,10 @@
+#[cfg(all(feature = "dualcache-ff", feature = "std"))]
+use crate::DualCacheFF;
 use crate::core::AHashMap;
-use no_std_tool::collections::SimpleBloom;
 use crate::core::column::{ColumnArray, Columns, MultiVectorPointer};
 #[cfg(feature = "std")]
 use crate::core::commands::PartitionCommand;
 use crate::core::qsbr::{WorkerNode, WorkerState};
-#[cfg(feature = "std")]
-use no_std_tool::collections::BoundedQueue;
 use crate::core::rcu::load_ref;
 use crate::io::storage::Storage;
 use crate::io::wal::WalProvider;
@@ -13,8 +12,9 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicPtr;
-#[cfg(all(feature = "dualcache-ff", feature = "std"))]
-use crate::DualCacheFF;
+#[cfg(feature = "std")]
+use no_std_tool::collections::BoundedQueue;
+use no_std_tool::collections::SimpleBloom;
 
 /// A single logical operation within a query plan.
 ///
@@ -487,16 +487,17 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         {
             if !self.bypass_l1_cache {
                 let handle = self.route.hot_index.register_thread();
-            let _pin = dualcache_ff::core::qsbr::pin(handle.qsbr_node);
+                let _pin = dualcache_ff::core::qsbr::pin(handle.qsbr_node);
 
-            if self
-                .route
-                .hot_index
-                .get(&(self.route.partition_id, entity_id), &handle).is_some()
-            {
-                let node = self.get_pointer(entity_id)?;
-                let idx = *node.attribute_indices.get(attr)?;
-                let cols = crate::core::rcu::load_ref(&self.route.columns);
+                if self
+                    .route
+                    .hot_index
+                    .get(&(self.route.partition_id, entity_id), &handle)
+                    .is_some()
+                {
+                    let node = self.get_pointer(entity_id)?;
+                    let idx = *node.attribute_indices.get(attr)?;
+                    let cols = crate::core::rcu::load_ref(&self.route.columns);
                     let col = cols.str_cols.get(attr)?;
                     return col.get_element_pinned(idx);
                 }
@@ -661,16 +662,7 @@ pub struct PartitionRoute<const N: usize> {
     /// partitions. Keyed by `(partition_id, entity_id)` so that cache
     /// eviction decisions span the full working set.
     #[cfg(all(feature = "dualcache-ff", feature = "std"))]
-    pub hot_index: Arc<
-        DualCacheFF<
-            (u32, usize),
-            (),
-            64,
-            4096,
-            262144,
-            266304,
-        >,
-    >,
+    pub hot_index: Arc<DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304>>,
     /// RCU pointer to the partition's [`SimpleBloom<N>`] filter. Consulted
     /// during reads to short-circuit storage lookups for absent keys.
     pub bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
@@ -833,7 +825,6 @@ impl<'a, const N: usize> Query<'a, N> {
 mod tests {
     use super::*;
     use crate::core::atomic::AtomicPtr;
-    use no_std_tool::collections::SimpleBloom;
     use crate::core::column::MultiVectorPointer;
     use crate::core::column::{ColumnArray, ColumnData, Columns};
     use crate::core::qsbr::QsbrManager;
@@ -843,6 +834,7 @@ mod tests {
     use alloc::string::ToString;
     use alloc::sync::Arc;
     use alloc::vec;
+    use no_std_tool::collections::SimpleBloom;
 
     /// Helper: build a minimal PartitionRoute with pre-populated data.
     /// Inserts entity_id=0 with: int "score"=42, str "name"="alice", blob "data"=[1,2,3]
