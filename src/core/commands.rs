@@ -1,8 +1,8 @@
+use alloc::vec::Vec;
 use crate::AHashMap;
 use crate::core::column::MultiVectorPointer;
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 
 /// A dynamically typed value that can be stored in a cdDB column.
 ///

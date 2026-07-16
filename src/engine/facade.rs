@@ -1,9 +1,8 @@
+use alloc::vec::Vec;
 use alloc::sync::Arc;
 
 #[cfg(feature = "std")]
 use alloc::string::{String, ToString};
-#[cfg(feature = "std")]
-use alloc::vec::Vec;
 
 /// A high-level unified persistence trait for cdDB tiered storage backend.
 /// Exposes standard CRUD operations.

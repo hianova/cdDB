@@ -1,10 +1,10 @@
+use alloc::vec::Vec;
 use crate::AHashMap;
 use crate::core::atomic::AtomicPtr;
 use crate::core::query::{PartitionRoute, Query, QueryNode, QueryResult};
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
 use no_std_tool::collections::BoundedQueue;

@@ -1,6 +1,6 @@
+use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::string::ToString;
-use alloc::vec::Vec;
 pub use no_std_tool::sync::Backoff;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use crate::AHashMap;
 use crate::core::atomic::AtomicPtr;
 use crate::core::column::MultiVectorPointer;
@@ -5,7 +6,6 @@ use crate::io::platform::FileSystem;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
-use alloc::vec::Vec;
 
 use crate::DualCacheFF;
 use no_std_tool::collections::SimpleBloom;
@@ -160,7 +160,8 @@ impl<const N: usize> Partition<N> {
             self.bloom_count += 1;
         }
 
-        if self.bloom_count > (self.bloom_bits * 7 / 10) {
+        let rebuild_pct = crate::covopt_param!("BLOOM_REBUILD_PCT", 71, 50..95);
+        if self.bloom_count > (self.bloom_bits * rebuild_pct / 100) {
             self.rebuild_bloom_filter();
         }
     }
@@ -220,8 +221,9 @@ impl<const N: usize> Partition<N> {
                 let (lock, cvar) = &*shutdown_flag_clone;
                 loop {
                     let mut shutdown = lock.lock().unwrap();
+                    let interval = crate::covopt_param!("COMPACTION_INTERVAL", 594, 60..3600);
                     let result = cvar
-                        .wait_timeout(shutdown, std::time::Duration::from_secs(300))
+                        .wait_timeout(shutdown, std::time::Duration::from_secs(interval))
                         .unwrap();
                     shutdown = result.0;
                     if *shutdown || storage_clone.strong_count() == 0 {
@@ -247,7 +249,8 @@ impl<const N: usize> Partition<N> {
 
             let mut commands = vec![cmd];
             let mut shutdown_received = false;
-            for _ in 0..1000 {
+            let batch_size = crate::covopt_param!("GROUP_COMMIT_BATCH", 4218, 100..10000);
+            for _ in 0..batch_size {
                 if let Ok(next) = self.writer_rx.try_recv() {
                     if let crate::core::commands::PartitionCommand::Shutdown = next {
                         shutdown_received = true;

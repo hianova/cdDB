@@ -1,10 +1,8 @@
 #[cfg(feature = "std")]
+use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 #[cfg(feature = "std")]
 use alloc::sync::Arc;
-#[cfg(feature = "std")]
-use alloc::vec::Vec;
-
 #[cfg(feature = "std")]
 use crate::{
     CacheConfig, CdDBDispatcher, WalMode,

@@ -1,7 +1,7 @@
+use alloc::vec::Vec;
 use crate::core::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use crate::core::rcu::GarbageEntry;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 /// A singly-linked list node that wraps a single [`WorkerState`].
 ///

@@ -127,14 +127,33 @@ pub mod core;
 pub mod engine;
 pub mod io;
 
-#[cfg(feature = "std")]
-pub mod agent;
-#[cfg(feature = "std")]
-pub mod ml;
 
 #[cfg(all(feature = "std", feature = "dualcache-ff"))]
 pub use cache::HitCache;
 
+#[macro_export]
+macro_rules! covopt_param {
+    ($name:expr, $default:expr, $range:expr) => {
+        {
+            #[cfg(feature = "covopt")]
+            {
+                if let Ok(val_str) = ::std::env::var(concat!("COVOPT_", $name)) {
+                    if let Ok(val) = val_str.parse() {
+                        val
+                    } else {
+                        $default
+                    }
+                } else {
+                    $default
+                }
+            }
+            #[cfg(not(feature = "covopt"))]
+            {
+                $default
+            }
+        }
+    };
+}
 // Re-export public types for API compatibility
 pub use core::column::{ColumnArray, Columns};
 pub use core::commands::{

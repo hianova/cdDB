@@ -1,4 +1,5 @@
 #[cfg(all(feature = "dualcache-ff", feature = "std"))]
+use alloc::vec::Vec;
 use crate::DualCacheFF;
 use crate::core::AHashMap;
 use crate::core::column::{ColumnArray, Columns, MultiVectorPointer};
@@ -10,7 +11,6 @@ use crate::io::storage::Storage;
 use crate::io::wal::WalProvider;
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::sync::atomic::AtomicPtr;
 #[cfg(feature = "std")]
 use no_std_tool::collections::BoundedQueue;
@@ -866,7 +866,7 @@ mod tests {
             str_col.release_lock();
         }
 
-        let blob_col = Arc::new(ColumnArray::<alloc::vec::Vec<u8>, 1024>::new());
+        let blob_col = Arc::new(ColumnArray::<Vec<u8>, 1024>::new());
         {
             blob_col.acquire_lock();
             let mut data = load_clone(&blob_col.data);
@@ -1515,7 +1515,7 @@ mod tests {
         // Build a route with "payload" (blob), "epoch" (int), "type" (int)
         let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
 
-        let payload_col = Arc::new(ColumnArray::<alloc::vec::Vec<u8>, 1024>::new());
+        let payload_col = Arc::new(ColumnArray::<Vec<u8>, 1024>::new());
         {
             payload_col.acquire_lock();
             let mut data = load_clone(&payload_col.data);
@@ -1605,7 +1605,7 @@ mod tests {
     fn test_query_execute_batch_multiple_nodes() {
         let route = make_test_route();
         let _q = Query::new(&route);
-        let _results: alloc::vec::Vec<alloc::string::String> = vec![];
+        let _results: Vec<alloc::string::String> = vec![];
         // q.execute_with_cb(...)
         // assert_eq!(results.len(), 3);
         // assert!(results[0].contains("Int(42)"));

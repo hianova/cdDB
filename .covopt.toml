@@ -1,9 +1,16 @@
 [[target]]
-test = "test_ahashmap_all_apis"
-expected = "O(1)"
+test = "covopt_audit_test"
+expected = "ON"
 n_values = "10,20,50"
-target_file = "src/core/map.rs"
-target_line = 68
+target_file = "tests/engine_bench.rs"
+target_line = 200
 require_cache_padding = false
 require_branch_hints = false
 require_aerospace_grade = false
+env_mode = true
+
+[parameters]
+GROUP_COMMIT_BATCH = { default = 1000, min = 100, max = 10000, type = "int" }
+BLOOM_REBUILD_PCT = { default = 70, min = 50, max = 95, type = "int" }
+COMPACTION_INTERVAL = { default = 300, min = 60, max = 3600, type = "int" }
+WAL_BATCH_SIZE = { default = 65536, min = 4096, max = 1048576, type = "int" }

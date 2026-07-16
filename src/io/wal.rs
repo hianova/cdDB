@@ -1,10 +1,10 @@
+use alloc::vec::Vec;
 use crate::core::commands::WriteCommand;
 use crate::io::platform::FileSystem;
 use alloc::string::String;
 #[cfg(feature = "std")]
 use alloc::string::ToString;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 /// Durability level for WAL and storage writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +43,7 @@ impl Default for FlushConfigBuilder {
 impl FlushConfigBuilder {
     pub fn new() -> Self {
         Self {
-            batch_size_bytes: 64 * 1024, // 64KB
+            batch_size_bytes: crate::covopt_param!("WAL_BATCH_SIZE", 204428, 4096..1048576),
             ttl_micros: 10_000,          // 10ms
             expert_mode: false,
         }

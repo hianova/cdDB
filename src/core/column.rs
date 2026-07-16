@@ -1,10 +1,10 @@
+use alloc::vec::Vec;
 use crate::AHashMap;
 use crate::core::atomic::{AtomicBool, AtomicPtr, Ordering};
 use crate::core::qsbr::WorkerState;
 use crate::core::rcu::{load_clone, load_ref, new_atomic_ptr};
 use alloc::string::String;
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 
 /// A typed collection of named columnar arrays, grouped by element type.
 ///
