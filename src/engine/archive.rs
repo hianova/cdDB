@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
-use no_std_tool::sha2::{Sha256, Digest};
+use sha2::{Sha256, Digest};
 #[cfg(feature = "std")]
 use std::fs::OpenOptions;
 #[cfg(feature = "std")]
