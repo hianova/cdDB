@@ -2,7 +2,7 @@
 test = "covopt_audit_test"
 expected = "ON"
 n_values = "10,20,50"
-target_file = "tests/engine_bench.rs"
+target_file = "tests/covopt_audit.rs"
 target_marker = "COVOPT_ANCHOR"
 require_cache_padding = false
 require_branch_hints = false
