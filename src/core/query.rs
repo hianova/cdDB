@@ -189,6 +189,8 @@ impl<T: Clone> Bump<T> {
 pub struct Query<'a, const N: usize> {
     route: &'a PartitionRoute<N>,
     worker: Arc<WorkerState>,
+    #[cfg(all(feature = "dualcache-ff", feature = "std"))]
+    cache_handle: crate::dualcache_ff::component::tls::TlsHandle,
 }
 
 /// An active query session that holds arena allocators and a QSBR pin.
@@ -207,6 +209,8 @@ pub struct QuerySession<'a, const N: usize> {
     str_arena: Bump<&'a str>,
     blob_arena: Bump<&'a [u8]>,
     bypass_l1_cache: bool,
+    #[cfg(all(feature = "dualcache-ff", feature = "std"))]
+    cache_handle: &'a crate::dualcache_ff::component::tls::TlsHandle,
 }
 
 impl<'a, const N: usize> Query<'a, N> {
@@ -224,7 +228,12 @@ impl<'a, const N: usize> Query<'a, N> {
     /// ```
     pub fn new(route: &'a PartitionRoute<N>) -> Self {
         let worker = route.register_worker();
-        Self { route, worker }
+        Self {
+            route,
+            worker,
+            #[cfg(all(feature = "dualcache-ff", feature = "std"))]
+            cache_handle: route.hot_index.register_thread(),
+        }
     }
 
     /// Create a [`QuerySession`], entering the QSBR critical section.
@@ -233,7 +242,10 @@ impl<'a, const N: usize> Query<'a, N> {
     /// worker registration stays valid. The QSBR pin is held until the
     /// returned `QuerySession` is dropped.
     pub fn session(&self) -> QuerySession<'_, N> {
-        QuerySession::new(self.route, &self.worker)
+        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
+        return QuerySession::new(self.route, &self.worker, &self.cache_handle);
+        #[cfg(not(all(feature = "dualcache-ff", feature = "std")))]
+        return QuerySession::new(self.route, &self.worker);
     }
 
     /// Execute a batch of query nodes, invoking the callback for each result.
@@ -278,6 +290,25 @@ impl<'a, const N: usize> QuerySession<'a, N> {
     ///
     /// Prefer [`Query::session`] over calling this directly. The QSBR pin
     /// acquired here is released by the [`Drop`] implementation.
+    #[cfg(all(feature = "dualcache-ff", feature = "std"))]
+    pub fn new(
+        route: &'a PartitionRoute<N>,
+        worker: &'a WorkerState,
+        cache_handle: &'a crate::dualcache_ff::component::tls::TlsHandle,
+    ) -> Self {
+        worker.enter();
+        Self {
+            route,
+            worker,
+            int_arena: Bump::new(),
+            str_arena: Bump::new(),
+            blob_arena: Bump::new(),
+            bypass_l1_cache: false,
+            cache_handle,
+        }
+    }
+
+    #[cfg(not(all(feature = "dualcache-ff", feature = "std")))]
     pub fn new(route: &'a PartitionRoute<N>, worker: &'a WorkerState) -> Self {
         worker.enter();
         Self {
@@ -486,13 +517,13 @@ impl<'a, const N: usize> QuerySession<'a, N> {
         #[cfg(all(feature = "dualcache-ff", feature = "std"))]
         {
             if !self.bypass_l1_cache {
-                let handle = self.route.hot_index.register_thread();
+                let handle = self.cache_handle;
                 let _pin = dualcache_ff::core::qsbr::pin(handle.qsbr_node);
 
                 if self
                     .route
                     .hot_index
-                    .get(&(self.route.partition_id, entity_id), &handle)
+                    .get(&(self.route.partition_id, entity_id), handle)
                     .is_some()
                 {
                     let node = self.get_pointer(entity_id)?;
@@ -517,6 +548,27 @@ impl<'a, const N: usize> QuerySession<'a, N> {
 
     /// Fetch an integer attribute for an entity.
     pub fn get_int(&self, entity_id: usize, attr: &str) -> Option<u32> {
+        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
+        {
+            if !self.bypass_l1_cache {
+                let handle = self.cache_handle;
+                let _pin = dualcache_ff::core::qsbr::pin(handle.qsbr_node);
+
+                if self
+                    .route
+                    .hot_index
+                    .get(&(self.route.partition_id, entity_id), handle)
+                    .is_some()
+                {
+                    let node = self.get_pointer(entity_id)?;
+                    let idx = *node.attribute_indices.get(attr)?;
+                    let cols = crate::core::rcu::load_ref(&self.route.columns);
+                    let col = cols.int_cols.get(attr)?;
+                    return col.get_element_pinned(idx);
+                }
+            }
+        }
+
         if let Some(ptr) = self.get_pointer(entity_id)
             && let Some(&idx) = ptr.attribute_indices.get(attr)
         {
@@ -530,6 +582,27 @@ impl<'a, const N: usize> QuerySession<'a, N> {
 
     /// Fetch a blob attribute for an entity.
     pub fn get_blob(&self, entity_id: usize, attr: &str) -> Option<Vec<u8>> {
+        #[cfg(all(feature = "dualcache-ff", feature = "std"))]
+        {
+            if !self.bypass_l1_cache {
+                let handle = self.cache_handle;
+                let _pin = dualcache_ff::core::qsbr::pin(handle.qsbr_node);
+
+                if self
+                    .route
+                    .hot_index
+                    .get(&(self.route.partition_id, entity_id), handle)
+                    .is_some()
+                {
+                    let node = self.get_pointer(entity_id)?;
+                    let idx = *node.attribute_indices.get(attr)?;
+                    let cols = crate::core::rcu::load_ref(&self.route.columns);
+                    let col = cols.blob_cols.get(attr)?;
+                    return col.get_element_pinned(idx);
+                }
+            }
+        }
+
         if let Some(ptr) = self.get_pointer(entity_id)
             && let Some(&idx) = ptr.attribute_indices.get(attr)
         {

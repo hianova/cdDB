@@ -250,6 +250,7 @@ impl<const N: usize> Partition<N> {
             let mut commands = vec![cmd];
             let mut shutdown_received = false;
             let batch_size = crate::covopt_param!("GROUP_COMMIT_BATCH", 4218, 100..10000);
+            let mut batch_backoff = crate::io::platform::Backoff::new();
             for _ in 0..batch_size {
                 if let Ok(next) = self.writer_rx.try_recv() {
                     if let crate::core::commands::PartitionCommand::Shutdown = next {
@@ -257,8 +258,13 @@ impl<const N: usize> Partition<N> {
                         break;
                     }
                     commands.push(next);
+                    batch_backoff = crate::io::platform::Backoff::new();
                 } else {
-                    break;
+                    if batch_backoff.is_completed() {
+                        break;
+                    } else {
+                        batch_backoff.snooze();
+                    }
                 }
             }
 

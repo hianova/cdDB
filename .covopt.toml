@@ -4,8 +4,8 @@ expected = "ON"
 n_values = "10,20,50"
 target_file = "tests/covopt_audit.rs"
 target_marker = "COVOPT_ANCHOR"
-require_cache_padding = false
-require_branch_hints = false
+require_cache_padding = true
+require_branch_hints = true
 require_aerospace_grade = false
 env_mode = true
 

@@ -35,7 +35,12 @@ fn run_workload(pattern: AccessPattern, read_ratio_percent: u8) -> BenchResult {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().to_path_buf().to_string_lossy().into_owned();
 
-    let mut db = CdDBDispatcher::<512>::new_std(Some(path.clone()), cdDB::CacheConfig::default());
+    let is_high_write = read_ratio_percent <= 50;
+    let cache_config = cdDB::CacheConfig {
+        daemon_mode: !is_high_write,
+        ..Default::default()
+    };
+    let mut db = CdDBDispatcher::<512>::new_std(Some(path.clone()), cache_config);
     let writer =
         db.register_partition_with_wal_provider("bench_partition".to_string(), Arc::new(NoopWal));
     let route = db.get_route("bench_partition").unwrap();
@@ -92,7 +97,8 @@ fn run_workload(pattern: AccessPattern, read_ratio_percent: u8) -> BenchResult {
                             None
                         };
                         reads += 1;
-                        let _ = query.get_int(key as usize, "v");
+                        let session = query.session().with_bypass_l1_cache(is_high_write);
+                        let _ = session.get_int(key as usize, "v");
                         if let Some(start) = op_start {
                             let elapsed = start.elapsed().as_nanos() as u64;
                             let _ = hist.record(elapsed);
