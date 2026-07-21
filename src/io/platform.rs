@@ -314,12 +314,16 @@ pub struct StdMessageQueue {
 impl MessageQueue for StdMessageQueue {
     fn recv(&self) -> Result<crate::core::commands::PartitionCommand, String> {
         let mut backoff = Backoff::new();
+        let mut sleep_micros = 1;
         loop {
             if let Some(cmd) = self.rx.pop() {
                 return Ok(cmd);
             }
             if backoff.is_completed() {
-                std::thread::yield_now();
+                std::thread::sleep(std::time::Duration::from_micros(sleep_micros));
+                if sleep_micros < 2000 {
+                    sleep_micros *= 2;
+                }
             } else {
                 backoff.snooze();
             }
