@@ -4,15 +4,11 @@ use std::cell::UnsafeCell;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
-
 static NEXT_CACHE_ID: AtomicUsize = AtomicUsize::new(0);
-
-std::thread_local! {
-    static HANDLES: UnsafeCell<Vec<Option<TlsHandle>>> = const { UnsafeCell::new(Vec::new()) };
-}
-
-/// An ergonomic, auto-TLS-managed wrapper around `DualCacheFF`.
-/// It provides O(1) lock-free caching performance while hiding thread registration overheads.
+std::thread_local! { static HANDLES : UnsafeCell < Vec < Option < TlsHandle >>> = const { UnsafeCell :: new (Vec :: new ()) } ; }
+#[doc = " An ergonomic, auto-TLS-managed wrapper around `DualCacheFF`."]
+#[doc = " It provides O(1) lock-free caching performance while hiding thread registration overheads."]
+#[repr(C, align(64))]
 pub struct HitCache<
     K: Eq + Hash + Clone + Copy + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
@@ -24,7 +20,6 @@ pub struct HitCache<
     cache_id: usize,
     pub inner: DualCacheFF<K, V, B0, B1, B2, B3>,
 }
-
 impl<
     K: Eq + Hash + Clone + Copy + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
@@ -40,7 +35,6 @@ impl<
             inner: DualCacheFF::new(),
         }
     }
-
     #[inline(always)]
     fn with_handle<R, F: FnOnce(&TlsHandle) -> R>(&self, f: F) -> R {
         HANDLES.with(|handles| unsafe {
@@ -48,24 +42,22 @@ impl<
             if vec.len() <= self.cache_id {
                 vec.resize_with(self.cache_id + 1, || None);
             }
-            if vec[self.cache_id].is_none() {
-                vec[self.cache_id] = Some(self.inner.register_thread());
+            let slot = vec.get_unchecked_mut(self.cache_id);
+            if slot.is_none() {
+                *slot = Some(self.inner.register_thread());
             }
-            f(vec[self.cache_id].as_ref().unwrap_unchecked())
+            f(slot.as_ref().unwrap_unchecked())
         })
     }
-
     #[inline(always)]
     pub fn get(&self, key: &K) -> Option<V> {
         self.with_handle(|handle| self.inner.get(key, handle))
     }
-
     #[inline(always)]
     pub fn insert(&self, key: K, value: V) {
         self.with_handle(|handle| self.inner.insert(key, value, handle))
     }
 }
-
 impl<
     K: Eq + Hash + Clone + Copy + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,

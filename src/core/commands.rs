@@ -1,88 +1,80 @@
-use alloc::vec::Vec;
 use crate::AHashMap;
 use crate::core::column::MultiVectorPointer;
 use alloc::format;
 use alloc::string::{String, ToString};
-
-/// A dynamically typed value that can be stored in a cdDB column.
-///
-/// cdDB columns are schema-flexible: each attribute key can hold one of three
-/// concrete value kinds.  The variant chosen at write time determines which
-/// [`Attributes`] bucket the value is placed into and how it is encoded on
-/// disk.
+use alloc::vec::Vec;
+#[doc = " A dynamically typed value that can be stored in a cdDB column."]
+#[doc = ""]
+#[doc = " cdDB columns are schema-flexible: each attribute key can hold one of three"]
+#[doc = " concrete value kinds.  The variant chosen at write time determines which"]
+#[doc = " [`Attributes`] bucket the value is placed into and how it is encoded on"]
+#[doc = " disk."]
 #[derive(Clone, Debug)]
 pub enum ColumnValue {
-    /// A UTF-8 string value.
+    #[doc = " A UTF-8 string value."]
     Str(String),
-    /// An unsigned 32-bit integer value.
+    #[doc = " An unsigned 32-bit integer value."]
     Int(u32),
-    /// An arbitrary binary blob.
+    #[doc = " An arbitrary binary blob."]
     Blob(Vec<u8>),
 }
-
-/// A typed attribute map used to carry named key-value pairs for write commands.
-///
-/// `Attributes<V>` is a thin newtype wrapper around [`AHashMap<String, V>`].
-/// Three concrete instantiations are used throughout cdDB:
-///
-/// | Type parameter | Stored values |
-/// |---|---|
-/// | `String`  | UTF-8 string attributes |
-/// | `u32`     | Unsigned integer attributes |
-/// | `Vec<u8>` | Binary blob attributes |
-///
-/// The separation allows each attribute kind to be encoded and decoded
-/// independently without boxing or runtime type dispatch.
+#[doc = " A typed attribute map used to carry named key-value pairs for write commands."]
+#[doc = ""]
+#[doc = " `Attributes<V>` is a thin newtype wrapper around [`AHashMap<String, V>`]."]
+#[doc = " Three concrete instantiations are used throughout cdDB:"]
+#[doc = ""]
+#[doc = " | Type parameter | Stored values |"]
+#[doc = " |---|---|"]
+#[doc = " | `String`  | UTF-8 string attributes |"]
+#[doc = " | `u32`     | Unsigned integer attributes |"]
+#[doc = " | `Vec<u8>` | Binary blob attributes |"]
+#[doc = ""]
+#[doc = " The separation allows each attribute kind to be encoded and decoded"]
+#[doc = " independently without boxing or runtime type dispatch."]
 #[derive(Clone, Debug, Default)]
+#[repr(C, align(64))]
 pub struct Attributes<V>(AHashMap<String, V>);
-
 impl<V> Attributes<V> {
-    /// Creates a new, empty attribute map.
+    #[doc = " Creates a new, empty attribute map."]
     pub fn new() -> Self {
         Self(AHashMap::default())
     }
-
-    /// Inserts a key-value pair into the map.
-    ///
-    /// If the map already contains an entry for `key`, the old value is
-    /// silently replaced.
+    #[doc = " Inserts a key-value pair into the map."]
+    #[doc = ""]
+    #[doc = " If the map already contains an entry for `key`, the old value is"]
+    #[doc = " silently replaced."]
     pub fn insert(&mut self, key: String, value: V) {
         self.0.insert(key, value);
     }
-
-    /// Returns a reference to the value associated with `key`, or `None` if
-    /// no such key exists.
+    #[doc = " Returns a reference to the value associated with `key`, or `None` if"]
+    #[doc = " no such key exists."]
     pub fn get(&self, key: &str) -> Option<&V> {
         self.0.get(key)
     }
-
-    /// Returns a reference to the underlying [`AHashMap`].
+    #[doc = " Returns a reference to the underlying [`AHashMap`]."]
     pub fn inner(&self) -> &AHashMap<String, V> {
         &self.0
     }
-
-    /// Returns the number of key-value pairs in the map.
+    #[doc = " Returns the number of key-value pairs in the map."]
     pub fn len(&self) -> usize {
         self.0.len()
     }
-
-    /// Returns `true` if the map contains no entries.
+    #[doc = " Returns `true` if the map contains no entries."]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-
-    /// Serializes the attribute map into `buf` using a caller-supplied value
-    /// encoder.
-    ///
-    /// The binary layout is:
-    /// ```text
-    /// [entry_count: u32 LE]
-    /// for each entry:
-    ///   [key_len: u32 LE][key_bytes: UTF-8][value: encoded by val_encoder]
-    /// ```
-    ///
-    /// `val_encoder` receives a reference to the value and the output buffer;
-    /// it is responsible for appending the encoded value bytes.
+    #[doc = " Serializes the attribute map into `buf` using a caller-supplied value"]
+    #[doc = " encoder."]
+    #[doc = ""]
+    #[doc = " The binary layout is:"]
+    #[doc = " ```text"]
+    #[doc = " [entry_count: u32 LE]"]
+    #[doc = " for each entry:"]
+    #[doc = "   [key_len: u32 LE][key_bytes: UTF-8][value: encoded by val_encoder]"]
+    #[doc = " ```"]
+    #[doc = ""]
+    #[doc = " `val_encoder` receives a reference to the value and the output buffer;"]
+    #[doc = " it is responsible for appending the encoded value bytes."]
     pub fn encode_to(&self, buf: &mut Vec<u8>, val_encoder: fn(&V, &mut Vec<u8>)) {
         buf.extend_from_slice(&(self.0.len() as u32).to_le_bytes());
         for (k, v) in &self.0 {
@@ -91,17 +83,16 @@ impl<V> Attributes<V> {
             val_encoder(v, buf);
         }
     }
-
-    /// Deserializes an attribute map from `buf` starting at `*pos`, advancing
-    /// `*pos` past the consumed bytes.
-    ///
-    /// `val_decoder` is responsible for reading a single value from `buf`
-    /// starting at the cursor position and advancing the cursor accordingly.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Some(Self)` on success, or `None` if the buffer is too short,
-    /// the entry count is inconsistent, or any key is not valid UTF-8.
+    #[doc = " Deserializes an attribute map from `buf` starting at `*pos`, advancing"]
+    #[doc = " `*pos` past the consumed bytes."]
+    #[doc = ""]
+    #[doc = " `val_decoder` is responsible for reading a single value from `buf`"]
+    #[doc = " starting at the cursor position and advancing the cursor accordingly."]
+    #[doc = ""]
+    #[doc = " # Returns"]
+    #[doc = ""]
+    #[doc = " Returns `Some(Self)` on success, or `None` if the buffer is too short,"]
+    #[doc = " the entry count is inconsistent, or any key is not valid UTF-8."]
     pub fn decode_from(
         buf: &[u8],
         pos: &mut usize,
@@ -123,43 +114,39 @@ impl<V> Attributes<V> {
         Some(Self(map))
     }
 }
-
 impl<V> From<AHashMap<String, V>> for Attributes<V> {
     fn from(map: AHashMap<String, V>) -> Self {
         Self(map)
     }
 }
-
 impl<V> IntoIterator for Attributes<V> {
     type Item = (String, V);
     type IntoIter = <crate::AHashMap<String, V> as IntoIterator>::IntoIter;
-
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
 }
-
-/// A write command that can be applied to a cdDB partition and persisted to
-/// the Write-Ahead Log (WAL).
-///
-/// Each variant maps to a distinct WAL type-ID byte (`0`–`3`) and is
-/// round-trippable through [`WriteCommand::encode`] / [`WriteCommand::decode`].
+#[doc = " A write command that can be applied to a cdDB partition and persisted to"]
+#[doc = " the Write-Ahead Log (WAL)."]
+#[doc = ""]
+#[doc = " Each variant maps to a distinct WAL type-ID byte (`0`–`3`) and is"]
+#[doc = " round-trippable through [`WriteCommand::encode`] / [`WriteCommand::decode`]."]
 #[derive(Clone, Debug)]
 pub enum WriteCommand {
-    /// Insert a standard entity with dynamically typed attributes.
+    #[doc = " Insert a standard entity with dynamically typed attributes."]
     Insert {
-        /// The entity ID to insert.
+        #[doc = " The entity ID to insert."]
         entity_id: usize,
-        /// String attributes.
+        #[doc = " String attributes."]
         attributes: Attributes<String>,
-        /// Integer attributes.
+        #[doc = " Integer attributes."]
         attributes_int: Attributes<u32>,
-        /// Blob attributes.
+        #[doc = " Blob attributes."]
         attributes_blob: Attributes<Vec<u8>>,
     },
-    /// Batch insert multiple standard entities in a single WAL record.
-    ///
-    /// Each tuple contains `(entity_id, string_attrs, int_attrs, blob_attrs)`.
+    #[doc = " Batch insert multiple standard entities in a single WAL record."]
+    #[doc = ""]
+    #[doc = " Each tuple contains `(entity_id, string_attrs, int_attrs, blob_attrs)`."]
     #[allow(clippy::type_complexity)]
     BatchInsert(
         Vec<(
@@ -169,48 +156,46 @@ pub enum WriteCommand {
             Attributes<Vec<u8>>,
         )>,
     ),
-    /// Delete an entity.
+    #[doc = " Delete an entity."]
     Delete {
-        /// The entity ID to delete.
+        #[doc = " The entity ID to delete."]
         entity_id: usize,
     },
-    /// Fast insertion path, skipping dynamic attributes parsing.
+    #[doc = " Fast insertion path, skipping dynamic attributes parsing."]
     InsertFast {
-        /// The entity ID to insert.
+        #[doc = " The entity ID to insert."]
         entity_id: usize,
-        /// Fast insertion epoch tracking.
+        #[doc = " Fast insertion epoch tracking."]
         epoch: u32,
-        /// The specific type of the record.
+        #[doc = " The specific type of the record."]
         record_type: u32,
-        /// The raw payload bytes.
+        #[doc = " The raw payload bytes."]
         payload: alloc::sync::Arc<Vec<u8>>,
     },
 }
-
 impl WriteCommand {
-    /// Constructs a [`WriteCommand::Insert`] from a heterogeneous attribute map.
-    ///
-    /// Iterates over `typed_attrs` and routes each entry to the appropriate
-    /// typed bucket (`attributes`, `attributes_int`, or `attributes_blob`)
-    /// based on its [`ColumnValue`] variant.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use cddb::commands::{WriteCommand, ColumnValue};
-    /// use cddb::AHashMap;
-    ///
-    /// let mut attrs = AHashMap::default();
-    /// attrs.insert("name".to_string(), ColumnValue::Str("Alice".to_string()));
-    /// attrs.insert("age".to_string(), ColumnValue::Int(30));
-    ///
-    /// let cmd = WriteCommand::insert(42, attrs);
-    /// ```
+    #[doc = " Constructs a [`WriteCommand::Insert`] from a heterogeneous attribute map."]
+    #[doc = ""]
+    #[doc = " Iterates over `typed_attrs` and routes each entry to the appropriate"]
+    #[doc = " typed bucket (`attributes`, `attributes_int`, or `attributes_blob`)"]
+    #[doc = " based on its [`ColumnValue`] variant."]
+    #[doc = ""]
+    #[doc = " # Examples"]
+    #[doc = ""]
+    #[doc = " ```rust,ignore"]
+    #[doc = " use cddb::commands::{WriteCommand, ColumnValue};"]
+    #[doc = " use cddb::AHashMap;"]
+    #[doc = ""]
+    #[doc = " let mut attrs = AHashMap::default();"]
+    #[doc = " attrs.insert(\"name\".to_string(), ColumnValue::Str(\"Alice\".to_string()));"]
+    #[doc = " attrs.insert(\"age\".to_string(), ColumnValue::Int(30));"]
+    #[doc = ""]
+    #[doc = " let cmd = WriteCommand::insert(42, attrs);"]
+    #[doc = " ```"]
     pub fn insert(entity_id: usize, typed_attrs: AHashMap<String, ColumnValue>) -> Self {
         let mut attributes = Attributes::new();
         let mut attributes_int = Attributes::new();
         let mut attributes_blob = Attributes::new();
-
         for (k, v) in typed_attrs {
             match v {
                 ColumnValue::Str(s) => attributes.insert(k, s),
@@ -218,7 +203,6 @@ impl WriteCommand {
                 ColumnValue::Blob(b) => attributes_blob.insert(k, b),
             }
         }
-
         WriteCommand::Insert {
             entity_id,
             attributes,
@@ -226,21 +210,20 @@ impl WriteCommand {
             attributes_blob,
         }
     }
-
-    /// Encodes the command into a byte buffer suitable for WAL persistence.
-    ///
-    /// The first byte is a type discriminant:
-    ///
-    /// | Byte | Variant |
-    /// |---|---|
-    /// | `0` | [`WriteCommand::Insert`] |
-    /// | `1` | [`WriteCommand::BatchInsert`] |
-    /// | `2` | [`WriteCommand::Delete`] |
-    /// | `3` | [`WriteCommand::InsertFast`] |
-    ///
-    /// All multi-byte integers are little-endian.  The returned buffer can be
-    /// passed directly to [`WriteCommand::decode`] to recover the original
-    /// command.
+    #[doc = " Encodes the command into a byte buffer suitable for WAL persistence."]
+    #[doc = ""]
+    #[doc = " The first byte is a type discriminant:"]
+    #[doc = ""]
+    #[doc = " | Byte | Variant |"]
+    #[doc = " |---|---|"]
+    #[doc = " | `0` | [`WriteCommand::Insert`] |"]
+    #[doc = " | `1` | [`WriteCommand::BatchInsert`] |"]
+    #[doc = " | `2` | [`WriteCommand::Delete`] |"]
+    #[doc = " | `3` | [`WriteCommand::InsertFast`] |"]
+    #[doc = ""]
+    #[doc = " All multi-byte integers are little-endian.  The returned buffer can be"]
+    #[doc = " passed directly to [`WriteCommand::decode`] to recover the original"]
+    #[doc = " command."]
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
@@ -250,7 +233,7 @@ impl WriteCommand {
                 attributes_int,
                 attributes_blob,
             } => {
-                buf.push(0); // Type ID
+                buf.push(0);
                 buf.extend_from_slice(&(*entity_id as u64).to_le_bytes());
                 attributes.encode_to(&mut buf, |v: &String, b: &mut Vec<u8>| {
                     b.extend_from_slice(&(v.len() as u32).to_le_bytes());
@@ -302,16 +285,15 @@ impl WriteCommand {
         }
         buf
     }
-
-    /// Decodes a [`WriteCommand`] from a byte buffer previously produced by
-    /// [`WriteCommand::encode`].
-    ///
-    /// # Returns
-    ///
-    /// Returns `Some(cmd)` when decoding succeeds, or `None` if:
-    /// - `buf` is empty or too short for the declared payload,
-    /// - the type-discriminant byte is not in the range `0`–`3`, or
-    /// - any UTF-8 key cannot be decoded.
+    #[doc = " Decodes a [`WriteCommand`] from a byte buffer previously produced by"]
+    #[doc = " [`WriteCommand::encode`]."]
+    #[doc = ""]
+    #[doc = " # Returns"]
+    #[doc = ""]
+    #[doc = " Returns `Some(cmd)` when decoding succeeds, or `None` if:"]
+    #[doc = " - `buf` is empty or too short for the declared payload,"]
+    #[doc = " - the type-discriminant byte is not in the range `0`–`3`, or"]
+    #[doc = " - any UTF-8 key cannot be decoded."]
     pub fn decode(buf: &[u8]) -> Option<Self> {
         let mut pos = 0;
         let type_id = *buf.get(pos)?;
@@ -433,35 +415,31 @@ impl WriteCommand {
         }
     }
 }
-
-/// Generic trait for sending responses back from background operations.
+#[doc = " Generic trait for sending responses back from background operations."]
 pub trait ResponseSender<T>: Send + Sync {
-    /// Send the value through the response channel.
+    #[doc = " Send the value through the response channel."]
     fn send(&self, val: T) -> Result<(), String>;
 }
-
 #[cfg(feature = "std")]
 impl<T: Send + 'static> ResponseSender<T> for std::sync::mpsc::SyncSender<T> {
     fn send(&self, val: T) -> Result<(), String> {
         self.send(val).map_err(|e| e.to_string())
     }
 }
-
-/// Internal command enum used for synchronous communication with partition background threads.
+#[doc = " Internal command enum used for synchronous communication with partition background threads."]
 pub enum PartitionCommand {
-    /// A regular write command (Insert/Delete).
+    #[doc = " A regular write command (Insert/Delete)."]
     Write(WriteCommand),
-    /// Load an entity synchronously from disk into memory.
+    #[doc = " Load an entity synchronously from disk into memory."]
     InternalLoad {
-        /// The ID of the entity to load.
+        #[doc = " The ID of the entity to load."]
         entity_id: usize,
-        /// The callback channel for the response.
+        #[doc = " The callback channel for the response."]
         response_tx: alloc::boxed::Box<dyn ResponseSender<Option<MultiVectorPointer>>>,
     },
-    /// Shutdown the partition thread cleanly.
+    #[doc = " Shutdown the partition thread cleanly."]
     Shutdown,
 }
-
 impl core::fmt::Debug for PartitionCommand {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -474,64 +452,61 @@ impl core::fmt::Debug for PartitionCommand {
         }
     }
 }
-
-/// IT Operations Log Levels
+#[doc = " IT Operations Log Levels"]
 #[derive(Debug, Clone)]
 pub enum LogLevel {
-    /// Information level.
+    #[doc = " Information level."]
     Info,
-    /// Warning level.
+    #[doc = " Warning level."]
     Warn,
-    /// Error level.
+    #[doc = " Error level."]
     Error,
-    /// Fatal level.
+    #[doc = " Fatal level."]
     Fatal,
-    /// Debug level.
+    #[doc = " Debug level."]
     Debug,
 }
-
-/// A structured record for IT Operations (Monitoring, Logging, etc.)
+#[doc = " A structured record for IT Operations (Monitoring, Logging, etc.)"]
 #[derive(Debug, Clone)]
+#[repr(C, align(64))]
 pub struct ITOpsRecord {
-    /// Unix timestamp of the event.
+    #[doc = " Unix timestamp of the event."]
     pub timestamp: u64,
-    /// Name of the service generating the log.
+    #[doc = " Name of the service generating the log."]
     pub service: String,
-    /// Node identifier.
+    #[doc = " Node identifier."]
     pub node: String,
-    /// Severity level of the log.
+    #[doc = " Severity level of the log."]
     pub level: LogLevel,
-    /// Log message content.
+    #[doc = " Log message content."]
     pub message: String,
-    /// CPU usage snapshot (0.0 to 1.0).
-    pub cpu_usage: f32, // 0.0 - 1.0
-    /// Memory usage snapshot (0.0 to 1.0).
-    pub mem_usage: f32, // 0.0 - 1.0
-    /// API response time in milliseconds.
+    #[doc = " CPU usage snapshot (0.0 to 1.0)."]
+    pub cpu_usage: f32,
+    #[doc = " Memory usage snapshot (0.0 to 1.0)."]
+    pub mem_usage: f32,
+    #[doc = " API response time in milliseconds."]
     pub response_time_ms: u32,
 }
-
 impl ITOpsRecord {
-    /// Converts the structured record into a pair of cdDB-compatible attribute
-    /// maps ready for use in a [`WriteCommand::Insert`].
-    ///
-    /// String attributes returned: `service`, `node`, `level`, `message`.
-    ///
-    /// Integer (`u32`) attributes returned:
-    /// - `timestamp` — the Unix timestamp, truncated to `u32::MAX` via `%`.
-    /// - `cpu_milli` — `cpu_usage × 1000` cast to `u32` (e.g. `0.75` → `750`).
-    /// - `mem_milli` — `mem_usage × 1000` cast to `u32` (e.g. `0.60` → `600`).
-    /// - `response_time` — `response_time_ms` as-is.
-    ///
-    /// The `× 1000` scaling preserves three decimal places of precision for
-    /// floating-point usage ratios within the integer attribute store.
+    #[doc = " Converts the structured record into a pair of cdDB-compatible attribute"]
+    #[doc = " maps ready for use in a [`WriteCommand::Insert`]."]
+    #[doc = ""]
+    #[doc = " String attributes returned: `service`, `node`, `level`, `message`."]
+    #[doc = ""]
+    #[doc = " Integer (`u32`) attributes returned:"]
+    #[doc = " - `timestamp` — the Unix timestamp, truncated to `u32::MAX` via `%`."]
+    #[doc = " - `cpu_milli` — `cpu_usage × 1000` cast to `u32` (e.g. `0.75` → `750`)."]
+    #[doc = " - `mem_milli` — `mem_usage × 1000` cast to `u32` (e.g. `0.60` → `600`)."]
+    #[doc = " - `response_time` — `response_time_ms` as-is."]
+    #[doc = ""]
+    #[doc = " The `× 1000` scaling preserves three decimal places of precision for"]
+    #[doc = " floating-point usage ratios within the integer attribute store."]
     pub fn to_cd_db_params(&self) -> (Attributes<String>, Attributes<u32>) {
         let mut attrs = AHashMap::default();
         attrs.insert("service".to_string(), self.service.clone());
         attrs.insert("node".to_string(), self.node.clone());
         attrs.insert("level".to_string(), format!("{:?}", self.level));
         attrs.insert("message".to_string(), self.message.clone());
-
         let mut attrs_int = AHashMap::default();
         attrs_int.insert(
             "timestamp".to_string(),
@@ -540,21 +515,18 @@ impl ITOpsRecord {
         attrs_int.insert("cpu_milli".to_string(), (self.cpu_usage * 1000.0) as u32);
         attrs_int.insert("mem_milli".to_string(), (self.mem_usage * 1000.0) as u32);
         attrs_int.insert("response_time".to_string(), self.response_time_ms);
-
         (attrs.into(), attrs_int.into())
     }
 }
-
-/// Extension trait for easier ITOps data ingestion
+#[doc = " Extension trait for easier ITOps data ingestion"]
 pub trait ITOpsIngest {
-    /// Converts and inserts an operations record as a WriteCommand.
+    #[doc = " Converts and inserts an operations record as a WriteCommand."]
     fn insert_ops_record(
         &self,
         entity_id: usize,
         record: ITOpsRecord,
     ) -> crate::core::commands::WriteCommand;
 }
-
 impl ITOpsIngest for ITOpsRecord {
     fn insert_ops_record(
         &self,
@@ -570,27 +542,22 @@ impl ITOpsIngest for ITOpsRecord {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::vec;
-
     #[test]
     fn test_write_command_encode_decode() {
         let mut attrs_int = Attributes::new();
         attrs_int.insert("val".to_string(), 42);
-
         let cmd = WriteCommand::Insert {
             entity_id: 1,
             attributes: Attributes::new(),
             attributes_int: attrs_int,
             attributes_blob: Attributes::new(),
         };
-
         let bytes = cmd.encode();
         let decoded = WriteCommand::decode(&bytes).unwrap();
-
         if let WriteCommand::Insert {
             entity_id,
             attributes_int,
@@ -603,7 +570,6 @@ mod tests {
             panic!("Decode failed");
         }
     }
-
     #[test]
     fn test_attributes() {
         let mut attrs = Attributes::new();
@@ -629,7 +595,6 @@ mod tests {
         .unwrap();
         assert_eq!(dec.get("key"), Some(&"val".to_string()));
     }
-
     #[test]
     fn test_it_ops() {
         let record = ITOpsRecord {
@@ -657,7 +622,6 @@ mod tests {
             panic!("Wrong command type");
         }
     }
-
     #[test]
     fn test_write_command_insert_helper() {
         use crate::core::commands::ColumnValue;
@@ -665,7 +629,6 @@ mod tests {
         attrs.insert("s".to_string(), ColumnValue::Str("foo".to_string()));
         attrs.insert("i".to_string(), ColumnValue::Int(42));
         attrs.insert("b".to_string(), ColumnValue::Blob(vec![1, 2]));
-
         let cmd = WriteCommand::insert(99, attrs);
         if let WriteCommand::Insert {
             entity_id,
@@ -682,20 +645,17 @@ mod tests {
             panic!("Expected Insert");
         }
     }
-
     #[test]
     fn test_decode_invalid() {
         assert!(WriteCommand::decode(&[]).is_none());
-        assert!(WriteCommand::decode(&[4]).is_none()); // Invalid variant
+        assert!(WriteCommand::decode(&[4]).is_none());
     }
-
     #[test]
     #[cfg(feature = "std")]
     fn test_partition_command_debug() {
         let cmd = PartitionCommand::Shutdown;
         let s = format!("{:?}", cmd);
         assert_eq!(s, "Shutdown");
-
         let (tx, _rx) = std::sync::mpsc::sync_channel(1);
         let internal_load = PartitionCommand::InternalLoad {
             entity_id: 42,
@@ -705,7 +665,6 @@ mod tests {
         assert!(s.contains("InternalLoad"));
         assert!(s.contains("entity_id: 42"));
     }
-
     #[test]
     fn test_batch_and_fast_insert() {
         let fast = WriteCommand::InsertFast {
@@ -725,14 +684,12 @@ mod tests {
         } else {
             panic!("Failed fast insert");
         }
-
         let mut attrs_str = Attributes::new();
         attrs_str.insert("k".to_string(), "v".to_string());
         let mut attrs_int = Attributes::new();
         attrs_int.insert("num".to_string(), 100);
         let mut attrs_blob = Attributes::new();
         attrs_blob.insert("data".to_string(), vec![255]);
-
         let batch = WriteCommand::BatchInsert(vec![(5, attrs_str, attrs_int, attrs_blob)]);
         let enc_batch = batch.encode();
         let dec_batch = WriteCommand::decode(&enc_batch).unwrap();
@@ -746,17 +703,13 @@ mod tests {
             panic!("Failed batch insert");
         }
     }
-
     #[test]
     fn test_write_command_extra_variants() {
-        // Test LogLevel Debug format
         assert_eq!(format!("{:?}", LogLevel::Info), "Info");
         assert_eq!(format!("{:?}", LogLevel::Warn), "Warn");
         assert_eq!(format!("{:?}", LogLevel::Error), "Error");
         assert_eq!(format!("{:?}", LogLevel::Fatal), "Fatal");
         assert_eq!(format!("{:?}", LogLevel::Debug), "Debug");
-
-        // Test WriteCommand::Delete encode/decode
         let del = WriteCommand::Delete { entity_id: 123 };
         let enc_del = del.encode();
         let dec_del = WriteCommand::decode(&enc_del).unwrap();
@@ -765,8 +718,6 @@ mod tests {
         } else {
             panic!("Delete decode failed");
         }
-
-        // Test PartitionCommand formatting
         assert_eq!(
             format!(
                 "{:?}",
@@ -774,8 +725,6 @@ mod tests {
             ),
             "Write(Delete { entity_id: 1 })"
         );
-
-        // Test Attributes::into_iter
         let mut attrs = Attributes::new();
         attrs.insert("x".to_string(), "y".to_string());
         let mut count = 0;
@@ -785,8 +734,6 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 1);
-
-        // Test From<AHashMap> for Attributes
         let mut map = crate::AHashMap::default();
         map.insert("a".to_string(), 1);
         let attrs_from = Attributes::from(map);

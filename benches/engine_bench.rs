@@ -1,4 +1,3 @@
-use std::vec::Vec;
 use crossbeam_utils::thread;
 use hdrhistogram::Histogram;
 use rand::Rng;
@@ -7,6 +6,7 @@ use rand::prelude::Distribution;
 use rand_distr::Zipf;
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
+use std::vec::Vec;
 
 use cdDB::core::commands::{ColumnValue, WriteCommand};
 use cdDB::io::wal::NoopWal;
@@ -153,7 +153,9 @@ fn main() {
     std::thread::Builder::new()
         .stack_size(128 * 1024 * 1024)
         .spawn(|| {
-            if std::env::var("COVOPT_GROUP_COMMIT_BATCH").is_ok() || std::env::var("COVOPT_MODE").is_ok() {
+            if std::env::var("COVOPT_GROUP_COMMIT_BATCH").is_ok()
+                || std::env::var("COVOPT_MODE").is_ok()
+            {
                 let result = run_workload(AccessPattern::Zipf, 99);
                 println!("COVOPT_SCORE: {:.2}", result.throughput);
                 return;

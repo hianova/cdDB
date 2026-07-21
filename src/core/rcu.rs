@@ -1,7 +1,6 @@
 use crate::core::atomic::{AtomicPtr, Ordering};
 use alloc::boxed::Box;
-
-/// Safely load a reference from an AtomicPtr.
+#[doc = " Safely load a reference from an AtomicPtr."]
 pub fn load_ref<'a, T>(atomic: &AtomicPtr<T>) -> &'a T {
     let ptr = atomic.load(Ordering::Acquire);
     if ptr.is_null() {
@@ -9,33 +8,28 @@ pub fn load_ref<'a, T>(atomic: &AtomicPtr<T>) -> &'a T {
     }
     unsafe { &*ptr }
 }
-
-/// Safely load and clone data from an AtomicPtr.
+#[doc = " Safely load and clone data from an AtomicPtr."]
 pub fn load_clone<T: Clone>(atomic: &AtomicPtr<T>) -> T {
     load_ref(atomic).clone()
 }
-
-/// Helper to wrap a value in a Box and return as AtomicPtr
+#[doc = " Helper to wrap a value in a Box and return as AtomicPtr"]
 pub fn new_atomic_ptr<T>(val: T) -> AtomicPtr<T> {
     AtomicPtr::new(Box::into_raw(Box::new(val)))
 }
-
-/// Swap and return old pointer for deferred freeing
+#[doc = " Swap and return old pointer for deferred freeing"]
 pub fn swap_ptr<T>(atomic: &AtomicPtr<T>, val: T) -> *mut T {
     let new_ptr = Box::into_raw(Box::new(val));
     atomic.swap(new_ptr, Ordering::AcqRel)
 }
-
-/// Encapsulated Garbage Entry to hide unsafe fields
+#[doc = " Encapsulated Garbage Entry to hide unsafe fields"]
+#[repr(C, align(64))]
 pub struct GarbageEntry {
     ptr: *mut (),
     pub epoch: usize,
     drop_fn: unsafe fn(*mut ()),
 }
-
 unsafe impl Send for GarbageEntry {}
 unsafe impl Sync for GarbageEntry {}
-
 impl GarbageEntry {
     pub fn new<T>(ptr: *mut T, epoch: usize) -> Self {
         unsafe fn drop_ptr<T>(p: *mut ()) {
@@ -43,7 +37,6 @@ impl GarbageEntry {
                 let _ = Box::from_raw(p as *mut T);
             }
         }
-
         Self {
             ptr: ptr as *mut (),
             epoch,
@@ -51,7 +44,6 @@ impl GarbageEntry {
         }
     }
 }
-
 impl Drop for GarbageEntry {
     fn drop(&mut self) {
         unsafe {
@@ -59,13 +51,12 @@ impl Drop for GarbageEntry {
         }
     }
 }
-
-/// Safely dereference a pointer to a node, returning None if null.
-/// Loads the node behind the pointer.
-///
-/// # Safety
-/// The caller must guarantee that the pointer is valid and properly aligned,
-/// and that no other thread is mutating the node at the same time if it's accessed immutably.
+#[doc = " Safely dereference a pointer to a node, returning None if null."]
+#[doc = " Loads the node behind the pointer."]
+#[doc = ""]
+#[doc = " # Safety"]
+#[doc = " The caller must guarantee that the pointer is valid and properly aligned,"]
+#[doc = " and that no other thread is mutating the node at the same time if it's accessed immutably."]
 pub unsafe fn load_node<'a, T>(ptr: *mut T) -> Option<&'a T> {
     if ptr.is_null() {
         None
@@ -73,12 +64,11 @@ pub unsafe fn load_node<'a, T>(ptr: *mut T) -> Option<&'a T> {
         Some(unsafe { &*ptr })
     }
 }
-
-/// Safely store a pointer into an AtomicPtr field of a node.
-/// Links a new node to the list.
-///
-/// # Safety
-/// The caller must ensure that `node` and `next_ptr` are valid, and `get_atomic_field` returns a valid pointer.
+#[doc = " Safely store a pointer into an AtomicPtr field of a node."]
+#[doc = " Links a new node to the list."]
+#[doc = ""]
+#[doc = " # Safety"]
+#[doc = " The caller must ensure that `node` and `next_ptr` are valid, and `get_atomic_field` returns a valid pointer."]
 pub unsafe fn link_node<T, P>(
     node: *mut T,
     get_atomic_field: impl FnOnce(&T) -> &crate::core::atomic::AtomicPtr<P>,

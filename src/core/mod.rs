@@ -1,5 +1,6 @@
 pub mod column;
 pub mod commands;
+pub mod hot_index;
 pub mod qsbr;
 pub mod query;
 
