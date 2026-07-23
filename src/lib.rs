@@ -113,6 +113,7 @@
 #![doc = "     println!(\"{:?}\", result);  // Int(100), then IntList([100])"]
 #![doc = " });"]
 #![doc = " ```"]
+#![allow(clippy::large_enum_variant)]
 #![no_std]
 #![allow(non_snake_case)]
 extern crate alloc;

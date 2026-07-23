@@ -1,3 +1,4 @@
+#![allow(clippy::absurd_extreme_comparisons, unused_comparisons)]
 macro_rules! likely {
     ($b:expr) => {
         $b
@@ -13,7 +14,7 @@ fn covopt_audit_test() {
     let mut sum = 0;
 
     for i in 0..n {
-        if likely!(i >= 0) {
+        if likely!(i < usize::MAX) {
             sum += i;
         }
         // COVOPT_ANCHOR

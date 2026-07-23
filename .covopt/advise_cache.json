@@ -1,0 +1,15 @@
+{
+  "files": {
+    "/Users/kuangtalin/Documents/Universal-Project/storage/cdDB/tests/covopt_audit.rs": {
+      "file_hash": 15651175069421211392,
+      "mca_reports": {
+        "_RNCNvCs3EEs7ta92Zm_12covopt_audits_17covopt_audit_test0B3_": {
+          "instructions": 13400,
+          "total_cycles": 7355,
+          "block_rthroughput": 27.5,
+          "ipc": 1.82
+        }
+      }
+    }
+  }
+}

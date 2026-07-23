@@ -7,7 +7,7 @@ pub trait HotIndexProvider: Send + Sync {
 
 #[cfg(all(feature = "dualcache-ff", feature = "std"))]
 impl<const B0: usize, const B1: usize, const B2: usize, const B3: usize> HotIndexProvider
-    for crate::DualCacheFF<(u32, usize), (), B0, B1, B2, B3>
+    for crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, B0, B1, B2, B3>
 {
     type Handle = crate::dualcache_ff::component::tls::TlsHandle;
 
@@ -37,7 +37,7 @@ impl<
     const P4: usize,
     const P5: usize,
     const P6: usize,
-> HotIndexProvider for crate::DualCacheFF<(u32, usize), (), P, C2, C1, C0, TC, P4, P5, P6> {
+> HotIndexProvider for crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, P, C2, C1, C0, TC, P4, P5, P6> {
     type Handle = ();
 
     fn register_thread(&self) -> Self::Handle {}

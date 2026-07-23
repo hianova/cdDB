@@ -130,7 +130,7 @@ pub struct CdDBDispatcher<const N: usize> {
     #[doc = " Cache keys are `(partition_id, entity_id)` tuples, ensuring isolation"]
     #[doc = " between partitions while allowing the eviction policy to see the full"]
     #[doc = " cross-partition access distribution."]
-    pub global_cache: Arc<DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304>>,
+    pub global_cache: Arc<DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304>>,
     #[doc = " Monotonically increasing counter used to assign a unique `u32` ID to"]
     #[doc = " each registered partition. Incremented once per"]
     #[doc = " [`register_partition_with_wal_provider`](Self::register_partition_with_wal_provider)"]
@@ -182,7 +182,29 @@ impl<const N: usize> CdDBDispatcher<N> {
         executor: Arc<dyn Executor>,
         _cache_config: crate::CacheConfig,
     ) -> Self {
-        let global_cache = cfg_select! { feature = "dualcache-ff" => { { let cache = alloc :: sync :: Arc :: new (DualCacheFF :: new ()) ; if _cache_config . daemon_mode { unsafe { (* alloc :: sync :: Arc :: as_ptr (& cache)) . set_daemon_mode (true) } ; } cache } } , _ => alloc :: sync :: Arc :: new (DualCacheFF :: new ()) , };
+        #[cfg(feature = "std")]
+        let global_cache = std::thread::Builder::new()
+            .stack_size(1024 * 1024 * 1024)
+            .spawn(move || {
+                let cache = alloc::sync::Arc::new(DualCacheFF::new());
+                if _cache_config.daemon_mode {
+                    unsafe { (*alloc::sync::Arc::as_ptr(&cache)).set_daemon_mode(true) };
+                }
+                cache
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        #[cfg(not(feature = "std"))]
+        let global_cache = {
+            let cache = alloc::sync::Arc::new(DualCacheFF::new());
+            // In no_std, daemon_mode might not be supported anyway, but keep logic consistent
+            if _cache_config.daemon_mode {
+                unsafe { (*alloc::sync::Arc::as_ptr(&cache)).set_daemon_mode(true) };
+            }
+            cache
+        };
         Self {
             route_table: AHashMap::default(),
             base_path,
@@ -461,7 +483,7 @@ impl<const N: usize> CdDBDispatcher<N> {
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
         bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
         partition_id: u32,
-        hot_index: Arc<DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304>>,
+        hot_index: Arc<DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304>>,
     ) -> crate::io::platform::TaskHandle {
         let fs_rt = self.fs.clone();
         let wal_rt = wal.clone();
@@ -862,9 +884,9 @@ mod tests {
             no_std_tool::collections::SimpleBloom::<1024>::new(),
         ));
         #[cfg(feature = "dualcache-ff")]
-        let cache: crate::DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304> = crate::DualCacheFF::new();
+        let cache: crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304> = crate::DualCacheFF::new();
         #[cfg(not(feature = "dualcache-ff"))]
-        let cache: crate::DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304> = crate::DualCacheFF::new(crate::CacheConfig::default());
+        let cache: crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304> = crate::DualCacheFF::new(crate::CacheConfig::default());
         let path = "/tmp/test_route".to_string();
         let _ = std::fs::remove_dir_all(&path);
         let storage = Arc::new(crate::Storage::new(

@@ -7,6 +7,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
+
 #[doc = " Represents the complete persisted state of a single entity."]
 #[doc = ""]
 #[doc = " An `EntityData` bundles the entity's unique identifier together with its"]
@@ -156,6 +157,13 @@ pub struct Storage {
     #[doc = " Only present on `std` targets."]
     #[cfg(feature = "std")]
     pub mmap: crate::core::Mutex<Option<alloc::sync::Arc<memmap2::Mmap>>>,
+    #[doc = " Memory-mapped write view of `entities.bin` for zero-syscall appends."]
+    #[doc = " Pre-allocated in chunks (e.g. 16MB) to avoid frequent remaps."]
+    #[cfg(feature = "std")]
+    pub mmap_writer: crate::core::Mutex<Option<memmap2::MmapMut>>,
+    #[doc = " Total capacity of the current mmap_writer on disk."]
+    #[cfg(feature = "std")]
+    pub disk_capacity: crate::core::Mutex<u64>,
 }
 impl Storage {
     #[doc = " Creates a new `Storage` instance for the given partition directory."]
@@ -176,18 +184,8 @@ impl Storage {
     #[doc = " * `fs` — Shared filesystem implementation."]
     pub fn new(base_path: String, fs: Arc<dyn FileSystem>) -> Self {
         #[cfg(feature = "std")]
-        let writer = {
-            let path = format!("{}/entities.bin", base_path);
-            let _ = fs.create_dir_all(&base_path);
-            use std::fs::OpenOptions;
-            let file_opt = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .ok()
-                .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
-            crate::core::Mutex::new(file_opt)
-        };
+        let _ = fs.create_dir_all(&base_path);
+        
         let s = Self {
             base_path,
             fs,
@@ -199,9 +197,13 @@ impl Storage {
             disk_index_dirty: AtomicBool::new(false),
             current_offset: crate::core::Mutex::new(0),
             #[cfg(feature = "std")]
-            writer,
+            writer: crate::core::Mutex::new(None),
             #[cfg(feature = "std")]
             mmap: crate::core::Mutex::new(None),
+            #[cfg(feature = "std")]
+            mmap_writer: crate::core::Mutex::new(None),
+            #[cfg(feature = "std")]
+            disk_capacity: crate::core::Mutex::new(0),
         };
         s.rebuild_disk_index();
         s
@@ -233,6 +235,8 @@ impl Storage {
                 *index = map;
                 let mut off = self.current_offset.lock().unwrap();
                 *off = pos as u64;
+                let mut cap = self.disk_capacity.lock().unwrap();
+                *cap = bytes.len() as u64;
             }
             #[cfg(not(feature = "std"))]
             {
@@ -244,6 +248,60 @@ impl Storage {
             self.swap_disk_index();
         }
     }
+
+    #[cfg(feature = "std")]
+    #[doc = " Allocates a zero-copy buffer directly from the underlying MmapMut."]
+    #[doc = " The caller can write directly into this buffer, bypassing intermediate UMEM."]
+    pub fn reserve_zero_copy_buffer(&self, max_size: usize) -> Result<(u64, *mut u8), String> {
+        let mut off_lock = self.current_offset.lock().unwrap();
+        let mut cap_lock = self.disk_capacity.lock().unwrap();
+        let mut mmap_w_lock = self.mmap_writer.lock().unwrap();
+        
+        let offset = *off_lock;
+        let record_len = max_size as u64;
+        
+        let path = format!("{}/entities.bin", self.base_path);
+        
+        if offset + record_len > *cap_lock || mmap_w_lock.is_none() {
+            *mmap_w_lock = None;
+            let chunk_size = 16 * 1024 * 1024;
+            let new_cap = (*cap_lock + record_len).max(*cap_lock + chunk_size);
+            
+            use std::fs::OpenOptions;
+            let file = OpenOptions::new().read(true).write(true).create(true).open(&path).map_err(|e| e.to_string())?;
+            file.set_len(new_cap).map_err(|e| e.to_string())?;
+            
+            let mmap = unsafe { memmap2::MmapMut::map_mut(&file).map_err(|e| e.to_string())? };
+            *mmap_w_lock = Some(mmap);
+            *cap_lock = new_cap;
+            
+            let mut r_lock = self.mmap.lock().unwrap();
+            *r_lock = None;
+        }
+        
+        // We advance the offset immediately to reserve the space.
+        // The caller must commit the actual used size later.
+        *off_lock = offset + record_len;
+        
+        if let Some(mmap) = mmap_w_lock.as_mut() {
+            let start = offset as usize;
+            let ptr = unsafe { mmap.as_mut_ptr().add(start) };
+            Ok((offset, ptr))
+        } else {
+            Err("Failed to reserve zero copy buffer".to_string())
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[doc = " Commits a previously reserved zero-copy buffer."]
+    pub fn commit_zero_copy(&self, offset: u64, entity_id: usize, payload_len: u32) {
+        let mut index = self.next_disk_index.lock().unwrap();
+        // Insert payload_len. Note that the actual record length on disk is payload_len + 4 (for length prefix)
+        // Since we reserved max_size, there might be gaps on disk, which is fine for append-only logs.
+        index.insert(entity_id, (offset, payload_len));
+        self.disk_index_dirty.store(true, Ordering::Release);
+    }
+
     fn peek_entity_id(buf: &[u8]) -> Option<usize> {
         if buf.len() >= 8 {
             Some(u64::from_le_bytes(buf[0..8].try_into().unwrap()) as usize)
@@ -266,10 +324,9 @@ impl Storage {
     pub fn flush(&self) -> Result<(), String> {
         #[cfg(feature = "std")]
         {
-            let mut lock = self.writer.lock().unwrap();
-            if let Some(w) = lock.as_mut() {
-                use std::io::Write;
-                w.flush().map_err(|e| e.to_string())?;
+            let mut lock = self.mmap_writer.lock().unwrap();
+            if let Some(mmap) = lock.as_mut() {
+                mmap.flush().map_err(|e| e.to_string())?;
             }
         }
         Ok(())
@@ -292,6 +349,60 @@ impl Storage {
         let next = self.next_disk_index.lock().unwrap().clone();
         crate::core::rcu::swap_ptr(&self.disk_index, next)
     }
+
+    #[doc = " Reserves a contiguous block of space in the memory-mapped file and yields a mutable slice."]
+    #[doc = " This allows external components (like network sockets) to write payload directly into"]
+    #[doc = " the database file, achieving Zero CPU Copy."]
+    #[doc = ""]
+    #[doc = " # Safety"]
+    #[doc = " The returned slice borrows from the underlying `MmapMut`. The caller MUST guarantee"]
+    #[doc = " they do not hold this slice across `compact` or other mutating calls that may"]
+    #[doc = " reallocate the memory map."]
+    #[cfg(feature = "std")]
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn reserve_mmap_space(&self, len: usize) -> Result<(u64, &mut [u8]), String> {
+        let mut off_lock = self.current_offset.lock().unwrap();
+        let mut cap_lock = self.disk_capacity.lock().unwrap();
+        let mut mmap_w_lock = self.mmap_writer.lock().unwrap();
+        
+        let offset = *off_lock;
+        let record_len = len as u64;
+        
+        if offset + record_len > *cap_lock || mmap_w_lock.is_none() {
+            *mmap_w_lock = None;
+            let path = format!("{}/entities.bin", self.base_path);
+            let chunk_size = 16 * 1024 * 1024;
+            let new_cap = (*cap_lock + record_len).max(*cap_lock + chunk_size);
+            use std::fs::OpenOptions;
+            let file = OpenOptions::new().read(true).write(true).create(true).open(&path).map_err(|e| e.to_string())?;
+            file.set_len(new_cap).map_err(|e| e.to_string())?;
+            let mmap = memmap2::MmapMut::map_mut(&file).map_err(|e| e.to_string())?;
+            *mmap_w_lock = Some(mmap);
+            *cap_lock = new_cap;
+            let mut r_lock = self.mmap.lock().unwrap();
+            *r_lock = None;
+        }
+        
+        // Immediately reserve the space
+        *off_lock = offset + record_len;
+        
+        let mmap = mmap_w_lock.as_mut().unwrap();
+        let start = offset as usize;
+        let end = start + len;
+        
+        // Extend lifetime to bypass the lock scope (controlled by external caller's synchronization).
+        let ptr = mmap[start..end].as_mut_ptr();
+        Ok((offset, core::slice::from_raw_parts_mut(ptr, len)))
+    }
+
+    #[doc = " Commits a previously reserved Zero-Copy buffer into the disk index."]
+    #[cfg(feature = "std")]
+    pub fn commit_reserved_space(&self, entity_id: usize, offset: u64, len: usize) {
+        let mut index = self.next_disk_index.lock().unwrap();
+        index.insert(entity_id, (offset, len as u32));
+        self.disk_index_dirty.store(true, Ordering::Release);
+    }
+
     #[doc = " Appends an entity to `entities.bin` as a length-prefixed record and"]
     #[doc = " updates the in-memory disk index."]
     #[doc = ""]
@@ -320,32 +431,40 @@ impl Storage {
         #[cfg(feature = "std")]
         {
             let mut off_lock = self.current_offset.lock().unwrap();
+            let mut cap_lock = self.disk_capacity.lock().unwrap();
+            let mut mmap_w_lock = self.mmap_writer.lock().unwrap();
+            
             let offset = *off_lock;
-            let use_fallback = {
-                let mut lock = self.writer.lock().unwrap();
-                if let Some(w) = lock.as_mut() {
-                    use std::io::Write;
-                    w.write_all(&record).map_err(|e| e.to_string())?;
-                    false
-                } else {
-                    true
-                }
-            };
-            if !use_fallback {
-                *off_lock = offset + record.len() as u64;
-                #[cfg(feature = "std")]
-                let mut index = self.next_disk_index.lock().unwrap();
-                #[cfg(not(feature = "std"))]
-                let mut index = self.next_disk_index.lock().unwrap();
-                index.insert(data.entity_id, (offset, bytes.len() as u32));
-                self.disk_index_dirty.store(true, Ordering::Release);
-                return Ok(());
+            let record_len = record.len() as u64;
+            
+            if offset + record_len > *cap_lock || mmap_w_lock.is_none() {
+                // Drop current mmap
+                *mmap_w_lock = None;
+                
+                // Calculate new capacity: grow by 16MB or exact if larger
+                let chunk_size = 16 * 1024 * 1024;
+                let new_cap = (*cap_lock + record_len).max(*cap_lock + chunk_size);
+                
+                use std::fs::OpenOptions;
+                let file = OpenOptions::new().read(true).write(true).create(true).open(&path).map_err(|e| e.to_string())?;
+                file.set_len(new_cap).map_err(|e| e.to_string())?;
+                
+                let mmap = unsafe { memmap2::MmapMut::map_mut(&file).map_err(|e| e.to_string())? };
+                *mmap_w_lock = Some(mmap);
+                *cap_lock = new_cap;
+                
+                // Invalidate reader mmap to pick up new size on next read
+                let mut r_lock = self.mmap.lock().unwrap();
+                *r_lock = None;
             }
-            self.fs.append(&path, &record)?;
-            *off_lock = offset + record.len() as u64;
-            #[cfg(feature = "std")]
-            let mut index = self.next_disk_index.lock().unwrap();
-            #[cfg(not(feature = "std"))]
+            
+            if let Some(mmap) = mmap_w_lock.as_mut() {
+                let start = offset as usize;
+                let end = start + record.len();
+                mmap[start..end].copy_from_slice(&record);
+            }
+            
+            *off_lock = offset + record_len;
             let mut index = self.next_disk_index.lock().unwrap();
             index.insert(data.entity_id, (offset, bytes.len() as u32));
             self.disk_index_dirty.store(true, Ordering::Release);
@@ -556,19 +675,28 @@ impl Storage {
                 .get_ref()
                 .sync_data()
                 .map_err(|e| e.to_string())?;
+            
+            let mut mmap_lock = self.mmap.lock().unwrap();
+            *mmap_lock = None;
+            let mut mmap_w_lock = self.mmap_writer.lock().unwrap();
+            *mmap_w_lock = None;
             *writer_lock = None;
+            
             let _ = std::fs::rename(&tmp_path, &path);
-            *writer_lock = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .ok()
-                .map(|f| std::io::BufWriter::with_capacity(64 * 1024, f));
+            
+            use std::fs::OpenOptions;
+            let file = OpenOptions::new().read(true).write(true).create(true).open(&path).ok();
+            if let Some(f) = file {
+                if let Ok(m) = unsafe { memmap2::MmapMut::map_mut(&f) } {
+                    *mmap_w_lock = Some(m);
+                }
+            }
+            
+            let mut cap_lock = self.disk_capacity.lock().unwrap();
+            *cap_lock = new_offset;
             *index_lock = new_index;
             *offset_lock = new_offset;
             self.disk_index_dirty.store(true, Ordering::Release);
-            let mut mmap_lock = self.mmap.lock().unwrap();
-            *mmap_lock = None;
         }
         Ok(())
     }

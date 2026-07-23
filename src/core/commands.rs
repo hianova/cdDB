@@ -1,3 +1,4 @@
+#![allow(clippy::large_enum_variant)]
 use crate::AHashMap;
 use crate::core::column::MultiVectorPointer;
 use alloc::format;
@@ -534,6 +535,7 @@ impl ITOpsIngest for ITOpsRecord {
         record: ITOpsRecord,
     ) -> crate::core::commands::WriteCommand {
         let (attributes, attributes_int) = record.to_cd_db_params();
+        #[allow(clippy::large_enum_variant)]
         crate::core::commands::WriteCommand::Insert {
             entity_id,
             attributes,

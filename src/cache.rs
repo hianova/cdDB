@@ -18,7 +18,7 @@ pub struct HitCache<
     const B3: usize,
 > {
     cache_id: usize,
-    pub inner: DualCacheFF<K, V, B0, B1, B2, B3>,
+    pub inner: DualCacheFF<K, V, dualcache_ff::core::config::DefaultExponentialPolicy, B0, B1, B2, B3>,
 }
 impl<
     K: Eq + Hash + Clone + Copy + Send + Sync + 'static,

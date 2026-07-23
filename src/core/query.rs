@@ -909,7 +909,7 @@ mod tests {
         }
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
-        let cache: crate::DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304> = cfg_select! { all (feature = "dualcache-ff" , feature = "std") => crate :: DualCacheFF :: new () , _ => crate :: DualCacheFF :: new (crate :: CacheConfig :: default ()) , };
+        let cache: crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304> = cfg_select! { all (feature = "dualcache-ff" , feature = "std") => crate :: DualCacheFF :: new () , _ => crate :: DualCacheFF :: new (crate :: CacheConfig :: default ()) , };
         let hot_index = Arc::new(cache);
         let storage = Arc::new(crate::Storage::new(
             "/tmp/cddb_test_query".to_string(),
@@ -1365,7 +1365,7 @@ mod tests {
         }
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
-        let cache: crate::DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304> = cfg_select! { all (feature = "dualcache-ff" , feature = "std") => crate :: DualCacheFF :: new () , _ => crate :: DualCacheFF :: new (crate :: CacheConfig :: default ()) , };
+        let cache: crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304> = cfg_select! { all (feature = "dualcache-ff" , feature = "std") => crate :: DualCacheFF :: new () , _ => crate :: DualCacheFF :: new (crate :: CacheConfig :: default ()) , };
         let route = Arc::new(PartitionRoute {
             name: "link_test".to_string(),
             partition_id: 0,
@@ -1498,7 +1498,7 @@ mod tests {
         }
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
         let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
-        let cache: crate::DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304> = cfg_select! { all (feature = "dualcache-ff" , feature = "std") => crate :: DualCacheFF :: new () , _ => crate :: DualCacheFF :: new (crate :: CacheConfig :: default ()) , };
+        let cache: crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304> = cfg_select! { all (feature = "dualcache-ff" , feature = "std") => crate :: DualCacheFF :: new () , _ => crate :: DualCacheFF :: new (crate :: CacheConfig :: default ()) , };
         let route = Arc::new(PartitionRoute {
             name: "signed_test".to_string(),
             partition_id: 0,

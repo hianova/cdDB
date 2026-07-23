@@ -79,7 +79,7 @@ pub struct Partition<const N: usize> {
     #[doc = " Storage layer instance for this partition."]
     pub storage: Arc<Storage>,
     #[doc = " Heat tracking cache for hot entities."]
-    pub hot_index: Arc<DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304>>,
+    pub hot_index: Arc<DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304>>,
     #[doc = " The unique numeric ID of this partition."]
     pub partition_id: u32,
     #[doc = " Thread-safe pointer to the Bloom filter."]
@@ -118,7 +118,7 @@ impl<const N: usize> Partition<N> {
         fs: Arc<dyn FileSystem>,
         shared_pointers: Arc<AtomicPtr<AHashMap<usize, MultiVectorPointer>>>,
         bloom_filter: Arc<AtomicPtr<SimpleBloom<N>>>,
-        hot_index: Arc<DualCacheFF<(u32, usize), (), 64, 4096, 262144, 266304>>,
+        hot_index: Arc<DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304>>,
         partition_id: u32,
     ) -> Self {
         let storage = Arc::new(Storage::new(storage_path, fs.clone()));
