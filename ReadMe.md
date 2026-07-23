@@ -2,6 +2,10 @@
 
 **cdDB** is an extreme-performance, DOD (Data-Oriented Design) columnar storage engine engineered for modern hardware architectures, emphasizing L1/L2 cache locality and Zero CPU Copy.
 
+> [!WARNING]
+> **Alpha Status Notice**
+> cdDB is currently in Alpha stage. Many unit and integration tests are marked as `#[ignore]` due to ongoing architectural refactoring of the DOD columnar execution engine. Some features might be unstable or incomplete. Use with caution in production environments.
+
 ## Tech Stack
 - **DOD Columnar Storage**: Data is laid out in contiguous column arrays rather than arrays of structures (AoS) to maximize cache locality and SIMD vectorization capabilities.
 - **Mmap Zero-Copy**: Maps disk files directly into the virtual memory space, bypassing the kernel page cache overhead during hot-path reads.
