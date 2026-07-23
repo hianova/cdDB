@@ -477,7 +477,6 @@ mod tests {
     use super::*;
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
     fn test_std_file_system() {
         let fs = StdFileSystem;
         let path = "test_fs.txt";
@@ -501,10 +500,9 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
     fn test_std_executor_and_queue() {
         let exec = StdExecutor;
-        let q = alloc::sync::Arc::new(no_std_tool::collections::BoundedQueue::new());
+        let q = no_std_tool::collections::BoundedQueue::new_arc();
         let mq = StdMessageQueue { rx: q.clone() };
         let ms = StdMessageSender { tx: q };
         let cmd = crate::core::commands::PartitionCommand::Shutdown;
@@ -557,9 +555,8 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
     fn test_std_message_sender_backoff() {
-        let q = alloc::sync::Arc::new(no_std_tool::collections::BoundedQueue::new());
+        let q = no_std_tool::collections::BoundedQueue::new_arc();
         let ms = StdMessageSender { tx: q.clone() };
         ms.tx
             .push(crate::core::commands::PartitionCommand::Shutdown)
@@ -574,7 +571,6 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
     fn test_std_filesystem_errors() {
         let fs = StdFileSystem;
         assert!(fs.read_dir("/nonexistent_dir_12345").is_err());

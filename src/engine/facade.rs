@@ -187,15 +187,17 @@ mod tests {
     use alloc::vec;
     use std::time::Duration;
     fn make_test_dispatcher() -> CdDBDispatcher<1024> {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let path = dir.path().to_string_lossy().to_string();
+        std::mem::forget(dir);
         CdDBDispatcher::<1024>::new(
-            None,
+            Some(path),
             Arc::new(StdFileSystem),
             Arc::new(StdExecutor),
             crate::CacheConfig::default(),
         )
     }
     #[test]
-    #[ignore]
     fn test_facade_str_store() {
         let mut dispatcher = make_test_dispatcher();
         let writer = dispatcher
@@ -214,7 +216,6 @@ mod tests {
         assert_eq!(store.get(1, "name"), None);
     }
     #[test]
-    #[ignore]
     fn test_facade_blob_store() {
         let mut dispatcher = make_test_dispatcher();
         let writer = dispatcher
@@ -233,7 +234,6 @@ mod tests {
         assert_eq!(store.get(2, "data"), None);
     }
     #[test]
-    #[ignore]
     fn test_facade_fast_insert() {
         let mut dispatcher = make_test_dispatcher();
         let writer = dispatcher

@@ -853,6 +853,7 @@ mod tests {
     #[doc = " Inserts entity_id=1 with: int \"score\"=100, str \"name\"=\"bob\", blob \"data\"=[4,5,6]"]
     fn make_test_route() -> Arc<PartitionRoute<1024>> {
         let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
+        let mut columns = Columns::<1024>::new();
         let int_col = Arc::new(ColumnArray::<u32, 1024>::new());
         {
             int_col.acquire_lock();
@@ -883,7 +884,6 @@ mod tests {
             let _ = old;
             blob_col.release_lock();
         }
-        let mut columns = Columns::<1024>::new();
         columns.int_cols.insert("score".to_string(), int_col);
         columns.str_cols.insert("name".to_string(), str_col);
         columns.blob_cols.insert("data".to_string(), blob_col);
@@ -908,7 +908,7 @@ mod tests {
             pointers.insert(1, ptr1);
         }
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
-        let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
+        let bloom = Arc::new(crate::core::rcu::new_atomic_ptr_from_box(SimpleBloom::<1024>::new_boxed()));
         let cache: crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304> = cfg_select! { all (feature = "dualcache-ff" , feature = "std") => crate :: DualCacheFF :: new () , _ => crate :: DualCacheFF :: new (crate :: CacheConfig :: default ()) , };
         let hot_index = Arc::new(cache);
         let storage = Arc::new(crate::Storage::new(
@@ -918,7 +918,7 @@ mod tests {
         Arc::new(PartitionRoute {
             name: "test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(no_std_tool::collections::BoundedQueue::new()),
+            writer_tx: Arc::from(no_std_tool::collections::BoundedQueue::new_boxed()),
             columns: columns_ptr,
             shared_pointers,
             hot_index,
@@ -971,7 +971,6 @@ mod tests {
         assert_eq!(b, &[30, 40, 50]);
     }
     #[test]
-    #[ignore]
     fn test_query_node_debug() {
         let node = QueryNode::Get {
             entity_id: 1,
@@ -1000,7 +999,6 @@ mod tests {
         assert!(alloc::format!("{:?}", node5).contains("Aggregate"));
     }
     #[test]
-    #[ignore]
     fn test_query_result_debug() {
         let res = QueryResult::IntSum(100);
         let s = alloc::format!("{:?}", res);
@@ -1042,7 +1040,6 @@ mod tests {
         assert!(dbg.contains("CdDbQuery"));
     }
     #[test]
-    #[ignore]
     fn test_query_session_get_int() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1052,7 +1049,6 @@ mod tests {
         assert_eq!(q.get_int(0, "nonexistent"), None);
     }
     #[test]
-    #[ignore]
     fn test_query_session_get_str() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1061,7 +1057,6 @@ mod tests {
         assert_eq!(q.get_str(2, "name"), None);
     }
     #[test]
-    #[ignore]
     fn test_query_session_get_blob() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1070,7 +1065,6 @@ mod tests {
         assert_eq!(q.get_blob(2, "data"), None);
     }
     #[test]
-    #[ignore]
     fn test_query_session_with_str() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1081,7 +1075,6 @@ mod tests {
         assert_eq!(none, None);
     }
     #[test]
-    #[ignore]
     fn test_query_session_with_blob() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1092,7 +1085,6 @@ mod tests {
         assert_eq!(none, None);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_scan() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1104,7 +1096,6 @@ mod tests {
         assert!(results[0].contains("IntList"));
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_scan_str() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1116,7 +1107,6 @@ mod tests {
         assert!(results[0].contains("StrList"));
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_scan_blob() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1128,7 +1118,6 @@ mod tests {
         assert!(results[0].contains("BlobList"));
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_scan_nonexistent() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1140,7 +1129,6 @@ mod tests {
         assert!(results[0].contains("None"));
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_get_int() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1160,7 +1148,6 @@ mod tests {
         assert!(got_int);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_get_str_via_get_node() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1180,7 +1167,6 @@ mod tests {
         assert!(got_str);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_get_blob_via_get_node() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1200,7 +1186,6 @@ mod tests {
         assert!(got_blob);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_get_none() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1219,7 +1204,6 @@ mod tests {
         assert!(got_none);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_aggregate_sum() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1238,7 +1222,6 @@ mod tests {
         assert_eq!(sum, 142);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_aggregate_count() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1257,7 +1240,6 @@ mod tests {
         assert_eq!(count, 2);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_aggregate_min_max() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1284,7 +1266,6 @@ mod tests {
         assert_eq!(max_val, 100);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_aggregate_avg() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1303,7 +1284,6 @@ mod tests {
         assert!((avg - 71.0).abs() < 0.01);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_aggregate_nonexistent() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1322,7 +1302,6 @@ mod tests {
         assert!(got_none);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_link() {
         let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let link_col = Arc::new(ColumnArray::<u32, 1024>::new());
@@ -1364,12 +1343,12 @@ mod tests {
             pointers.insert(1, ptr1);
         }
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
-        let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
+        let bloom = Arc::new(crate::core::rcu::new_atomic_ptr_from_box(SimpleBloom::<1024>::new_boxed()));
         let cache: crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304> = cfg_select! { all (feature = "dualcache-ff" , feature = "std") => crate :: DualCacheFF :: new () , _ => crate :: DualCacheFF :: new (crate :: CacheConfig :: default ()) , };
         let route = Arc::new(PartitionRoute {
             name: "link_test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(no_std_tool::collections::BoundedQueue::new()),
+            writer_tx: no_std_tool::collections::BoundedQueue::new_arc(),
             columns: columns_ptr,
             shared_pointers,
             hot_index: Arc::new(cache),
@@ -1399,7 +1378,6 @@ mod tests {
         assert!(got_str);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_link_none() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1419,7 +1397,6 @@ mod tests {
         assert!(got_none);
     }
     #[test]
-    #[ignore]
     fn test_query_sum_int_range() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1431,7 +1408,6 @@ mod tests {
         assert_eq!(result3, None);
     }
     #[test]
-    #[ignore]
     fn test_query_seed_bloom_filter() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1440,7 +1416,6 @@ mod tests {
         assert!(bloom.contains(&999usize));
     }
     #[test]
-    #[ignore]
     fn test_query_session_entities_iter() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1450,7 +1425,6 @@ mod tests {
         assert_eq!(entities, vec![0, 1]);
     }
     #[test]
-    #[ignore]
     fn test_query_session_get_signed_record() {
         let workers = Arc::new(AtomicPtr::new(core::ptr::null_mut()));
         let payload_col = Arc::new(ColumnArray::<Vec<u8>, 1024>::new());
@@ -1497,12 +1471,12 @@ mod tests {
             pointers.insert(0, ptr0);
         }
         let shared_pointers = Arc::new(new_atomic_ptr(pointers));
-        let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<1024>::new()));
+        let bloom = Arc::new(crate::core::rcu::new_atomic_ptr_from_box(SimpleBloom::<1024>::new_boxed()));
         let cache: crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304> = cfg_select! { all (feature = "dualcache-ff" , feature = "std") => crate :: DualCacheFF :: new () , _ => crate :: DualCacheFF :: new (crate :: CacheConfig :: default ()) , };
         let route = Arc::new(PartitionRoute {
             name: "signed_test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(no_std_tool::collections::BoundedQueue::new()),
+            writer_tx: no_std_tool::collections::BoundedQueue::new_arc(),
             columns: columns_ptr,
             shared_pointers,
             hot_index: Arc::new(cache),
@@ -1526,14 +1500,12 @@ mod tests {
         assert!(result2.is_none());
     }
     #[test]
-    #[ignore]
     fn test_query_execute_batch_multiple_nodes() {
         let route = make_test_route();
         let _q = Query::new(&route);
         let _results: Vec<alloc::string::String> = vec![];
     }
     #[test]
-    #[ignore]
     fn test_query_execute_range_none() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1553,7 +1525,6 @@ mod tests {
         assert!(got_none);
     }
     #[test]
-    #[ignore]
     fn test_query_execute_range_success() {
         let route = make_test_route();
         let q = Query::new(&route);
@@ -1574,7 +1545,6 @@ mod tests {
         assert!(got_range);
     }
     #[test]
-    #[ignore]
     fn test_query_link_blob() {
         let route = make_test_route();
         let link_col = Arc::new(crate::core::column::ColumnArray::<u32, 1024>::new());
@@ -1619,7 +1589,6 @@ mod tests {
         assert!(got_none);
     }
     #[test]
-    #[ignore]
     fn test_query_session_execute_aggregate_empty_avg() {
         let route = make_test_route();
         let empty_col = Arc::new(crate::core::column::ColumnArray::<u32, 1024>::new());

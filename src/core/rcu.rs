@@ -16,9 +16,17 @@ pub fn load_clone<T: Clone>(atomic: &AtomicPtr<T>) -> T {
 pub fn new_atomic_ptr<T>(val: T) -> AtomicPtr<T> {
     AtomicPtr::new(Box::into_raw(Box::new(val)))
 }
-#[doc = " Swap and return old pointer for deferred freeing"]
+#[doc = " Helper to wrap a boxed value as AtomicPtr"]
+pub fn new_atomic_ptr_from_box<T>(b: Box<T>) -> AtomicPtr<T> {
+    AtomicPtr::new(Box::into_raw(b))
+}
 pub fn swap_ptr<T>(atomic: &AtomicPtr<T>, val: T) -> *mut T {
     let new_ptr = Box::into_raw(Box::new(val));
+    atomic.swap(new_ptr, Ordering::AcqRel)
+}
+#[doc = " Swap and return old pointer for deferred freeing using a Box"]
+pub fn swap_ptr_with_box<T>(atomic: &AtomicPtr<T>, b: Box<T>) -> *mut T {
+    let new_ptr = Box::into_raw(b);
     atomic.swap(new_ptr, Ordering::AcqRel)
 }
 #[doc = " Encapsulated Garbage Entry to hide unsafe fields"]

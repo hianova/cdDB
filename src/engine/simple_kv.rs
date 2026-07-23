@@ -79,9 +79,10 @@ mod tests {
     use alloc::vec;
     use std::time::Duration;
     #[test]
-    #[ignore]
     fn test_simple_kv_store() {
-        let store = SimpleKvStore::open("/tmp/cddb_test_simple_kv");
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let path = dir.path().to_string_lossy().to_string();
+        let store = SimpleKvStore::open(&path);
         store.put(42, vec![1, 2, 3]).unwrap();
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(store.get(42), Some(vec![1, 2, 3]));
@@ -90,7 +91,6 @@ mod tests {
         assert_eq!(store.get(42), None);
     }
     #[test]
-    #[ignore]
     fn test_stack_overflow() {
         let _d = CdDBDispatcher::<1024>::new_std(None, crate::CacheConfig::default());
     }

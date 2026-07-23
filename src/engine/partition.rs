@@ -156,7 +156,7 @@ impl<const N: usize> Partition<N> {
     fn rebuild_bloom_filter(&mut self) {
         let _old_bits = self.bloom_bits;
         self.bloom_bits *= 2;
-        let new_bloom = SimpleBloom::<N>::new();
+        let new_bloom = SimpleBloom::<N>::new_boxed();
         let mut count = 0;
         {
             #[cfg(feature = "std")]
@@ -169,7 +169,7 @@ impl<const N: usize> Partition<N> {
             }
         }
         {
-            crate::core::rcu::swap_ptr(&self.bloom_filter, new_bloom);
+            crate::core::rcu::swap_ptr_with_box(&self.bloom_filter, new_bloom);
         }
         self.bloom_count = count;
     }
@@ -610,7 +610,6 @@ mod tests {
     use crate::io::wal::NoopWal;
     use no_std_tool::collections::SimpleBloom;
     #[test]
-    #[ignore]
     fn test_partition_apply_commands() {
         let columns = Arc::new(new_atomic_ptr(crate::core::column::Columns::<262144>::new()));
         let wal = Arc::new(NoopWal);
@@ -619,12 +618,12 @@ mod tests {
             next: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
         }));
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
-        let bloom_filter = Arc::new(new_atomic_ptr(SimpleBloom::<262144>::new()));
+        let bloom_filter = Arc::new(crate::core::rcu::new_atomic_ptr_from_box(SimpleBloom::<262144>::new_boxed()));
         #[cfg(feature = "dualcache-ff")]
         let hot_index = Arc::new(DualCacheFF::new());
         #[cfg(not(feature = "dualcache-ff"))]
         let hot_index = Arc::new(DualCacheFF::new());
-        let rx = Arc::new(no_std_tool::collections::BoundedQueue::new());
+        let rx = no_std_tool::collections::BoundedQueue::new_arc();
         let mut partition = Partition::new(
             alloc::boxed::Box::new(crate::io::platform::StdMessageQueue { rx }),
             columns.clone(),

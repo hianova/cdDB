@@ -466,7 +466,7 @@ impl<const N: usize> CdDBDispatcher<N> {
             .unwrap_or_else(|| format!("data/{}", path));
         let _ = self.fs.create_dir_all(&storage_path);
         let shared_pointers = Arc::new(new_atomic_ptr(AHashMap::default()));
-        let bloom = Arc::new(new_atomic_ptr(SimpleBloom::<N>::new()));
+        let bloom = Arc::new(crate::core::rcu::new_atomic_ptr_from_box(SimpleBloom::<N>::new_boxed()));
         let columns = Arc::new(new_atomic_ptr(Columns::<N>::new()));
         let workers = Arc::new(crate::core::atomic::AtomicPtr::new(core::ptr::null_mut()));
         (storage_path, shared_pointers, bloom, columns, workers)
@@ -831,7 +831,6 @@ mod tests {
     use no_std_tool::collections::BoundedQueue;
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
     fn test_dispatcher_register_with_budget() {
         let mut d = CdDBDispatcher::<1024>::new_std(None, crate::CacheConfig::default());
         let path = "test_budget".to_string();
@@ -841,9 +840,8 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
     fn test_user_writer_try_send_full_and_drop() {
-        let q = Arc::new(BoundedQueue::new());
+        let q = BoundedQueue::new_arc();
         let writer = UserWriter(q.clone());
         let mut i = 1;
         while writer
@@ -856,9 +854,8 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
     fn test_user_writer_send_backoff() {
-        let q = Arc::new(BoundedQueue::new());
+        let q = BoundedQueue::new_arc();
         let writer = UserWriter(q.clone());
         let cmd1 = WriteCommand::Delete { entity_id: 1 };
         writer.try_send(cmd1).unwrap();
@@ -872,7 +869,6 @@ mod tests {
     }
     #[cfg(feature = "std")]
     #[test]
-    #[ignore]
     fn test_route_getters_and_execute() {
         use crate::core::query::QueryNode;
         use crate::io::wal::NoopWal;
@@ -880,8 +876,8 @@ mod tests {
             crate::core::column::Columns::<1024>::new(),
         ));
         let ptrs = Arc::new(crate::core::rcu::new_atomic_ptr(crate::AHashMap::default()));
-        let bloom = Arc::new(crate::core::rcu::new_atomic_ptr(
-            no_std_tool::collections::SimpleBloom::<1024>::new(),
+        let bloom = Arc::new(crate::core::rcu::new_atomic_ptr_from_box(
+            no_std_tool::collections::SimpleBloom::<1024>::new_boxed(),
         ));
         #[cfg(feature = "dualcache-ff")]
         let cache: crate::DualCacheFF<(u32, usize), (), dualcache_ff::core::config::DefaultExponentialPolicy, 64, 4096, 262144, 266304> = crate::DualCacheFF::new();
@@ -897,7 +893,7 @@ mod tests {
         let route = PartitionRoute {
             name: "test".to_string(),
             partition_id: 0,
-            writer_tx: Arc::new(BoundedQueue::new()),
+            writer_tx: BoundedQueue::new_arc(),
             columns: cols,
             shared_pointers: ptrs,
             hot_index: Arc::new(cache) as Arc<dyn crate::core::hot_index::HotIndexProvider<Handle = crate::dualcache_ff::component::tls::TlsHandle>>,

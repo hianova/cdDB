@@ -213,7 +213,6 @@ pub use no_std_tool::dualcache_stub::DualCacheFF;
 mod macro_tests {
     cddb_init ! (pub static TEST_DB : 16 = "/tmp/cddb_macro_test" , partitions = ["test1" , "test2"]);
     #[test]
-    #[ignore]
     fn test_cddb_init_macro() {
         std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
